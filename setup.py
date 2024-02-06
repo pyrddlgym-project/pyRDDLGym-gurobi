@@ -25,8 +25,8 @@ setup(
       url="https://github.com/pyrddlgym-project/pyRDDLGym-gurobi",
       packages=find_packages(),
       install_requires=[
-          'pyRDDLGym>=2.0.0',
           'numpy>=1.22',
+          'pyRDDLGym>=2.0.0',
           'gurobipy>=10.0.0' 
         ],
       python_requires=">=3.8",
