@@ -24,7 +24,11 @@ setup(
       license="MIT License",
       url="https://github.com/pyrddlgym-project/pyRDDLGym-gurobi",
       packages=find_packages(),
-      install_requires=['pyRDDLGym>=2.0.0', 'rddlrepository', 'gurobipy>=10.0.0'],
+      install_requires=[
+          'pyRDDLGym>=2.0.0',
+          'numpy>=1.22',
+          'gurobipy>=10.0.0' 
+        ],
       python_requires=">=3.8",
       package_data={'': ['*.cfg']},
       include_package_data=True,
