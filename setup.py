@@ -17,7 +17,7 @@ from setuptools import setup, find_packages
 
 setup(
       name='pyRDDLGym-gurobi',
-      version='0.0.0',
+      version='0.1',
       author="Michael Gimelfarb, Ayal Taitler, Scott Sanner",
       author_email="mike.gimelfarb@mail.utoronto.ca, ataitler@gmail.com, ssanner@mie.utoronto.ca",
       description="pyRDDLGym-gurobi: Gurobi compilation of RDDL description files, and optimization tools.",
