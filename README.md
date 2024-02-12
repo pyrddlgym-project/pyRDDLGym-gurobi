@@ -87,3 +87,5 @@ controller = GurobiOnlineController(rddl=env.model, plan=plan, rollout_horizon=5
 ```
 
 and then the controller can be used as described in the previous section.
+
+
