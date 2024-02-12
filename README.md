@@ -4,6 +4,11 @@ Author: [Mike Gimelfarb](https://mike-gimelfarb.github.io)
 
 This repository supports compilation of RDDL description files into Gurobi's mixed-integer (non-linear) programs, and automated planning tools for optimizing these programs in MDPs.
 
+> [!NOTE]  
+> The Gurobi planners currently determinize all stochastic variable, making it less suitable for highly stochastic problems or problems with (stochastic) dead ends.
+> If you find it is not making sufficient progress on a stochastic problem, or doesn't scale well computationally to your problem, check out the [PROST planner](https://github.com/pyrddlgym-project/pyRDDLGym-prost) (for discrete spaces), the [JAX planner](https://github.com/pyrddlgym-project/pyRDDLGym-jax) (for continuous problems), or the [deep reinforcement learning wrappers](https://github.com/pyrddlgym-project/pyRDDLGym-rl).
+
+
 ## Contents
 
 - [Installation](#installation)
