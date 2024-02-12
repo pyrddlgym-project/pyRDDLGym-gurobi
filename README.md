@@ -1,4 +1,7 @@
 # pyRDDLGym-gurobi
+
+Author: [Mike Gimelfarb](https://mike-gimelfarb.github.io)
+
 This repository supports compilation of RDDL description files into Gurobi's mixed-integer (non-linear) programs, and automated planning tools for optimizing these programs in MDPs.
 
 ## Contents
