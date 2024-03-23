@@ -87,8 +87,6 @@ class GurobiRDDLCompiler:
         self.rddl = RDDLGrounder(deepcopy(rddl.ast)).ground()
         
         # compile initial values
-        if self.logger is not None:
-            self.logger.clear()
         initializer = RDDLValueInitializer(self.rddl, logger=self.logger)
         self.init_values = initializer.initialize()
         
