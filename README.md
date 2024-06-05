@@ -17,6 +17,7 @@ This repository supports compilation of RDDL description files into Gurobi's mix
 - [Customizing Gurobi](#customizing-gurobi)
   - [Configuration File](#configuration-file)
   - [Passing Parameters Directly](#passing-parameters-directly)
+- [Citing pyRDDLGym-gurobi](#citing-pyrddlgym-gurobi)
 
 ## Installation
 
@@ -96,4 +97,15 @@ controller = GurobiOnlineController(rddl=env.model, plan=plan, rollout_horizon=5
 
 and then the controller can be used as described in the previous section.
 
+## Citing pyRDDLGym-gurobi
 
+The following citation describes the main ideas of the framework. Please cite it if you found it useful:
+
+```
+@inproceedings{gimelfarb2024jaxplan,
+    title={JaxPlan and GurobiPlan: Optimization Baselines for Replanning in Discrete and Mixed Discrete and Continuous Probabilistic Domains},
+    author={Michael Gimelfarb and Ayal Taitler and Scott Sanner},
+    booktitle={34th International Conference on Automated Planning and Scheduling},
+    year={2024},
+    url={https://openreview.net/forum?id=7IKtmUpLEH}
+}
