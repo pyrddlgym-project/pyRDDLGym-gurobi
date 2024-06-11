@@ -99,7 +99,7 @@ and then the controller can be used as described in the previous section.
 
 ## Citing pyRDDLGym-gurobi
 
-The following citation describes the main ideas of the framework. Please cite it if you found it useful:
+The [following citation](https://ojs.aaai.org/index.php/ICAPS/article/view/31480) describes the main ideas of the framework. Please cite it if you found it useful:
 
 ```
 @inproceedings{gimelfarb2024jaxplan,
