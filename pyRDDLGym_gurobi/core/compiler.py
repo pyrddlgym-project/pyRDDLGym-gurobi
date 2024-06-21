@@ -34,7 +34,7 @@ class GurobiRDDLCompiler:
                  rollout_horizon: int=None,
                  epsilon: float=1e-5,
                  float_range: Tuple[float, float]=(1e-15, 1e15),
-                 model_params: Dict[str, object]={'NonConvex': 2},
+                 model_params: Dict[str, object]=None,
                  piecewise_options: str='',
                  logger: Logger=None,
                  verbose: int=1) -> None:
@@ -62,6 +62,8 @@ class GurobiRDDLCompiler:
         :param verbose: whether to print nothing (0), summary (1),
         or detailed (2) messages to console
         '''
+        if model_params is None:
+            model_params = {'NonConvex': 2}
         self.plan = plan
         if rollout_horizon is None:
             rollout_horizon = rddl.horizon
@@ -110,6 +112,7 @@ class GurobiRDDLCompiler:
               f'    float_range       ={self.float_range}\n'
               f'    float_equality_tol={self.epsilon}\n'
               f'    lookahead_horizon ={self.horizon}\n'
+              f'    verbose           ={self.verbose}\n'
               f'Gurobi model hyper-params:\n'
               f'    user_args         ={self.model_params}\n'
               f'    user_args_pw      ={self.pw_options}')
@@ -159,7 +162,7 @@ class GurobiRDDLCompiler:
         
         # logging
         if self.logger is not None:
-            message = f'[info] compiling initial bound information for Gurobi:'
+            message = '[info] compiling initial bound information for Gurobi:'
             for (name, (_, _, lb, ub, _)) in subs.items():
                 message += f'\n\t{name}, bounds=({lb}, {ub})'
             self.logger.log(message + '\n')  
@@ -280,7 +283,7 @@ class GurobiRDDLCompiler:
                 _, expr = rddl.cpfs[cpf]
                 subs[cpf] = self._gurobi(expr, model, subs)
     
-    def _compile_reward(self, model, subs) -> object:
+    def _compile_reward(self, model, subs) -> tuple:
         reward, _, lb, ub, _ = self._gurobi(self.rddl.reward, model, subs)
         return reward, (lb, ub)
     
