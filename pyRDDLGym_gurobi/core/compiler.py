@@ -1,7 +1,7 @@
 from copy import deepcopy
 import math
 import numpy as np
-from typing import Dict, List, Tuple, TYPE_CHECKING
+from typing import Any, Dict, List, Optional, Tuple, TYPE_CHECKING
 
 import gurobipy
 from gurobipy import GRB
@@ -34,9 +34,9 @@ class GurobiRDDLCompiler:
                  rollout_horizon: int=None,
                  epsilon: float=1e-5,
                  float_range: Tuple[float, float]=(1e-15, 1e15),
-                 model_params: Dict[str, object]=None,
+                 model_params: Optional[Dict[str, Any]]=None,
                  piecewise_options: str='',
-                 logger: Logger=None,
+                 logger: Optional[Logger]=None,
                  verbose: int=1) -> None:
         '''Creates a new compiler for formulating RDDL domains + instance as 
         a Gurobi mixed-integer non-linear optimization problem. In this base
@@ -107,7 +107,7 @@ class GurobiRDDLCompiler:
             if self.rddl.variable_types[var] == 'action-fluent':
                 self.noop_actions[var] = values
     
-    def summarize_hyperparameters(self):
+    def summarize_hyperparameters(self) -> None:
         print(f'Gurobi compiler hyper-params:\n'
               f'    float_range       ={self.float_range}\n'
               f'    float_equality_tol={self.epsilon}\n'
@@ -133,9 +133,8 @@ class GurobiRDDLCompiler:
             result[var.VarName] = (var.VType, var.LB, var.UB)
         return result
         
-    def compile(self, init_values: Dict[str, object]=None,
-                env: gurobipy.Env=None) -> \
-        Tuple[gurobipy.Model, List[Dict[str, object]]]:
+    def compile(self, init_values: Optional[Dict[str, Any]]=None,
+                env: Optional[gurobipy.Env]=None) -> Tuple[gurobipy.Model, List[Dict[str, Any]]]:
         '''Compiles and returns the current RDDL domain as a Gurobi optimization
         problem. Also returns action variables constructed during compilation 
         and policy parameter variables.
@@ -230,7 +229,7 @@ class GurobiRDDLCompiler:
             model.setParam(name, value)
         return model 
 
-    def _compile_init_subs(self, init_values=None) -> Dict[str, object]:
+    def _compile_init_subs(self, init_values=None) -> Dict[str, Any]:
         if init_values is None:
             init_values = self.init_values
         rddl = self.rddl

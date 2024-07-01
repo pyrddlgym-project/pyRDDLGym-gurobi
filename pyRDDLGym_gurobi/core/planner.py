@@ -1,4 +1,4 @@
-from typing import Dict, List, Tuple
+from typing import Any, Dict, List, Tuple, Optional
 
 import gurobipy
 from gurobipy import GRB
@@ -23,7 +23,7 @@ UNBOUNDED = (-GRB.INFINITY, +GRB.INFINITY)
 class GurobiPlan:
     '''Base class for all Gurobi compiled policies or plans.'''
     
-    def __init__(self, action_bounds: Dict[str, Tuple[float, float]]=None):
+    def __init__(self, action_bounds: Optional[Dict[str, Tuple[float, float]]]=None) -> None:
         if action_bounds is None:
             action_bounds = {}
         self.action_bounds = action_bounds
@@ -34,12 +34,12 @@ class GurobiPlan:
         else:
             return self.action_bounds.get(action, UNBOUNDED)
     
-    def summarize_hyperparameters(self):
+    def summarize_hyperparameters(self) -> None:
         pass
         
     def params(self, compiled: GurobiRDDLCompiler,
                model: gurobipy.Model,
-               values: Dict[str, object]=None) -> Dict[str, object]:
+               values: Optional[Dict[str, Any]]=None) -> Dict[str, Any]:
         '''Returns the parameters of this plan/policy to be optimized.
         
         :param compiled: A gurobi compiler where the current plan is initialized
@@ -49,7 +49,7 @@ class GurobiPlan:
         raise NotImplementedError
         
     def init_params(self, compiled: GurobiRDDLCompiler,
-                    model: gurobipy.Model) -> Dict[str, object]:
+                    model: gurobipy.Model) -> Dict[str, Any]:
         '''Return initial parameter values for the current policy class.
         
         :param compiled: A gurobi compiler where the current plan is initialized
@@ -59,9 +59,9 @@ class GurobiPlan:
 
     def actions(self, compiled: GurobiRDDLCompiler,
                 model: gurobipy.Model,
-                params: Dict[str, object],
+                params: Dict[str, Any],
                 step: int,
-                subs: Dict[str, object]) -> Dict[str, object]:
+                subs: Dict[str, Any]) -> Dict[str, Any]:
         '''Returns a dictionary of action variables predicted by the plan.
         
         :param compiled: A gurobi compiler where the current plan is initialized
@@ -74,9 +74,9 @@ class GurobiPlan:
         raise NotImplementedError
     
     def evaluate(self, compiled: GurobiRDDLCompiler,
-                 params: Dict[str, object],
+                 params: Dict[str, Any],
                  step: int,
-                 subs: Dict[str, object]) -> Dict[str, object]:
+                 subs: Dict[str, Any]) -> Dict[str, Any]:
         '''Evaluates the current policy with state variables in subs.
         
         :param compiled: A gurobi compiler where the current plan is initialized
@@ -88,7 +88,7 @@ class GurobiPlan:
         raise NotImplementedError
     
     def to_string(self, compiled: GurobiRDDLCompiler,
-                  params: Dict[str, object]) -> str:
+                  params: Dict[str, Any]) -> str:
         '''Returns a string representation of the current policy.
         
         :param params: parameter variables of the plan/policy
@@ -102,7 +102,7 @@ class GurobiStraightLinePlan(GurobiPlan):
     
     def params(self, compiled: GurobiRDDLCompiler,
                model: gurobipy.Model,
-               values: Dict[str, object]=None) -> Dict[str, object]:
+               values: Optional[Dict[str, Any]]=None) -> Dict[str, Any]:
         rddl = compiled.rddl
         action_vars = {}
         for (action, prange) in rddl.action_ranges.items():
@@ -119,7 +119,7 @@ class GurobiStraightLinePlan(GurobiPlan):
         return action_vars
         
     def init_params(self, compiled: GurobiRDDLCompiler,
-                    model: gurobipy.Model) -> Dict[str, object]:
+                    model: gurobipy.Model) -> Dict[str, Any]:
         param_values = {}
         for action in compiled.rddl.action_fluents:
             for step in range(compiled.horizon):
@@ -128,17 +128,17 @@ class GurobiStraightLinePlan(GurobiPlan):
 
     def actions(self, compiled: GurobiRDDLCompiler,
                 model: gurobipy.Model,
-                params: Dict[str, object],
+                params: Dict[str, Any],
                 step: int,
-                subs: Dict[str, object]) -> Dict[str, object]:
+                subs: Dict[str, Any]) -> Dict[str, Any]:
         action_vars = {action: params[f'{action}__{step}'] 
                        for action in compiled.rddl.action_fluents}
         return action_vars
     
     def evaluate(self, compiled: GurobiRDDLCompiler,
-                 params: Dict[str, object],
+                 params: Dict[str, Any],
                  step: int,
-                 subs: Dict[str, object]) -> Dict[str, object]:
+                 subs: Dict[str, Any]) -> Dict[str, Any]:
         rddl = compiled.rddl
         action_values = {}
         for (action, prange) in rddl.action_ranges.items():
@@ -152,7 +152,7 @@ class GurobiStraightLinePlan(GurobiPlan):
         return action_values
     
     def to_string(self, compiled: GurobiRDDLCompiler,
-                  params: Dict[str, object]) -> str:
+                  params: Dict[str, Any]) -> str:
         rddl = compiled.rddl
         res = ''
         for step in range(compiled.horizon):
@@ -168,9 +168,9 @@ class GurobiPiecewisePolicy(GurobiPlan):
     '''A piecewise linear policy in Gurobi.'''
     
     def __init__(self, *args,
-                 state_bounds: Dict[str, Tuple[float, float]]=None,
-                 dependencies_constr: Dict[str, List[str]]=None,
-                 dependencies_values: Dict[str, List[str]]=None,
+                 state_bounds: Optional[Dict[str, Tuple[float, float]]]=None,
+                 dependencies_constr: Optional[Dict[str, List[str]]]=None,
+                 dependencies_values: Optional[Dict[str, List[str]]]=None,
                  num_cases: int=1,
                  **kwargs) -> None:
         super(GurobiPiecewisePolicy, self).__init__(*args, **kwargs)   
@@ -187,7 +187,7 @@ class GurobiPiecewisePolicy(GurobiPlan):
         self.dependencies_values = dependencies_values
         self.num_cases = num_cases
     
-    def summarize_hyperparameters(self):
+    def summarize_hyperparameters(self) -> None:
         print(f'Gurobi policy hyper-params:\n'
               f'    num_cases     ={self.num_cases}\n'
               f'    state_bounds  ={self.state_bounds}\n'
@@ -203,7 +203,7 @@ class GurobiPiecewisePolicy(GurobiPlan):
     
     def params(self, compiled: GurobiRDDLCompiler,
                model: gurobipy.Model,
-               values: Dict[str, object]=None) -> Dict[str, object]:
+               values: Optional[Dict[str, Any]]=None) -> Dict[str, Any]:
         rddl = compiled.rddl  
         states_in_constr = self._get_states_for_constraints(rddl)
         states_in_values = self.dependencies_values
@@ -269,7 +269,7 @@ class GurobiPiecewisePolicy(GurobiPlan):
         return param_vars
     
     def init_params(self, compiled: GurobiRDDLCompiler,
-                    model: gurobipy.Model) -> Dict[str, object]:
+                    model: gurobipy.Model) -> Dict[str, Any]:
         rddl = compiled.rddl
         states_in_constr = self._get_states_for_constraints(rddl)
         states_in_values = self.dependencies_values
@@ -317,9 +317,9 @@ class GurobiPiecewisePolicy(GurobiPlan):
     
     def actions(self, compiled: GurobiRDDLCompiler,
                 model: gurobipy.Model,
-                params: Dict[str, object],
+                params: Dict[str, Any],
                 step: int,
-                subs: Dict[str, object]) -> Dict[str, object]:
+                subs: Dict[str, Any]) -> Dict[str, Any]:
         rddl = compiled.rddl
         states_in_constr = self._get_states_for_constraints(rddl)
         states_in_values = self.dependencies_values
@@ -397,9 +397,9 @@ class GurobiPiecewisePolicy(GurobiPlan):
         return action_vars
     
     def evaluate(self, compiled: GurobiRDDLCompiler,
-                 params: Dict[str, object],
+                 params: Dict[str, Any],
                  step: int,
-                 subs: Dict[str, object]) -> Dict[str, object]:
+                 subs: Dict[str, Any]) -> Dict[str, Any]:
         rddl = compiled.rddl
         states_in_constr = self._get_states_for_constraints(rddl)
         states_in_values = self.dependencies_values
@@ -456,7 +456,7 @@ class GurobiPiecewisePolicy(GurobiPlan):
         return action_values
 
     def to_string(self, compiled: GurobiRDDLCompiler,
-                  params: Dict[str, object]) -> str:
+                  params: Dict[str, Any]) -> str:
         rddl = compiled.rddl
         states_in_constr = self._get_states_for_constraints(rddl)
         states_in_values = self.dependencies_values
@@ -521,7 +521,7 @@ class GurobiQuadraticPolicy(GurobiPlan):
         
     def params(self, compiled: GurobiRDDLCompiler,
                model: gurobipy.Model,
-               values: Dict[str, object]=None) -> Dict[str, object]:
+               values: Optional[Dict[str, Any]]=None) -> Dict[str, Any]:
         rddl = compiled.rddl
         states = list(rddl.state_fluents.keys())
         clip_range = (-self.action_clip_value, +self.action_clip_value)
@@ -553,7 +553,7 @@ class GurobiQuadraticPolicy(GurobiPlan):
         return param_vars
         
     def init_params(self, compiled: GurobiRDDLCompiler,
-                    model: gurobipy.Model) -> Dict[str, object]:
+                    model: gurobipy.Model) -> Dict[str, Any]:
         rddl = compiled.rddl
         states = list(rddl.state_fluents.keys())
         
@@ -577,9 +577,9 @@ class GurobiQuadraticPolicy(GurobiPlan):
     
     def actions(self, compiled: GurobiRDDLCompiler,
                 model: gurobipy.Model,
-                params: Dict[str, object],
+                params: Dict[str, Any],
                 step: int,
-                subs: Dict[str, object]) -> Dict[str, object]:
+                subs: Dict[str, Any]) -> Dict[str, Any]:
         rddl = compiled.rddl
         states = list(rddl.state_fluents.keys())
         
@@ -610,9 +610,9 @@ class GurobiQuadraticPolicy(GurobiPlan):
         return action_vars
     
     def evaluate(self, compiled: GurobiRDDLCompiler,
-                 params: Dict[str, object],
+                 params: Dict[str, Any],
                  step: int,
-                 subs: Dict[str, object]) -> Dict[str, object]:
+                 subs: Dict[str, Any]) -> Dict[str, Any]:
         rddl = compiled.rddl
         states = list(rddl.state_fluents.keys())
         
@@ -639,7 +639,7 @@ class GurobiQuadraticPolicy(GurobiPlan):
         return action_values
         
     def to_string(self, compiled: GurobiRDDLCompiler,
-                  params: Dict[str, object]) -> str:
+                  params: Dict[str, Any]) -> str:
         rddl = compiled.rddl
         states = list(rddl.state_fluents.keys())
         
@@ -678,8 +678,8 @@ class GurobiOfflineController(BaseAgent):
     
     def __init__(self, rddl: RDDLLiftedModel,
                  plan: GurobiPlan,
-                 env: gurobipy.Env=None,
-                 **compiler_kwargs):
+                 env: Optional[gurobipy.Env]=None,
+                 **compiler_kwargs) -> None:
         '''Creates a new Gurobi control policy that is optimized offline in an 
         open-loop fashion.
         
@@ -721,7 +721,7 @@ class GurobiOfflineController(BaseAgent):
             raise_warning('Gurobi failed to find a feasible solution '
                           'in the given time limit: using no-op action.', 'red')
     
-    def sample_action(self, state):
+    def sample_action(self, state: Dict[str, Any]) -> Dict[str, Any]:
         
         # inputs to the optimizer include all current fluent values
         subs = self.compiler._compile_init_subs()
@@ -742,7 +742,7 @@ class GurobiOfflineController(BaseAgent):
         self.step += 1
         return action_values
                 
-    def reset(self):
+    def reset(self) -> None:
         self.step = 0
 
 
@@ -752,8 +752,8 @@ class GurobiOnlineController(BaseAgent):
 
     def __init__(self, rddl: RDDLLiftedModel,
                  plan: GurobiPlan,
-                 env: gurobipy.Env=None,
-                 **compiler_kwargs):
+                 env: Optional[gurobipy.Env]=None,
+                 **compiler_kwargs) -> None:
         '''Creates a new Gurobi control policy that is optimized online in a 
         closed-loop fashion.
         
@@ -783,7 +783,7 @@ class GurobiOnlineController(BaseAgent):
         self.env = env
         self.reset()
     
-    def sample_action(self, state):
+    def sample_action(self, state: Dict[str, Any]) -> Dict[str, Any]:
         
         # inputs to the optimizer include all current fluent values
         subs = self.compiler._compile_init_subs()
@@ -809,5 +809,5 @@ class GurobiOnlineController(BaseAgent):
         del model
         return action_values
         
-    def reset(self):
+    def reset(self) -> None:
         pass
