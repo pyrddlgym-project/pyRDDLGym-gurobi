@@ -329,7 +329,7 @@ class GurobiPiecewisePolicy(GurobiPlan):
             
             # action variable
             atype = compiled.GUROBI_TYPES[arange]
-            action_bounds = self.action_bounds[action]
+            action_bounds = self._bounds(rddl, action)
             action_var = compiled._add_var(model, atype, *action_bounds)
             action_vars[action] = (action_var, atype, *action_bounds, True)
             
@@ -705,6 +705,13 @@ class GurobiOfflineController(BaseAgent):
         self.plan = plan
         self.compiler = GurobiRDDLCompiler(rddl=rddl, plan=plan, **compiler_kwargs)
         
+        # try to use the preconditions to produce narrow action bounds
+        action_bounds = self.plan.action_bounds.copy()
+        for name in self.compiler.rddl.action_fluents:
+            if name not in action_bounds:
+                action_bounds[name] = self.compiler.bounds.get(name, UNBOUNDED)
+        self.plan.action_bounds = action_bounds
+        
         # optimize the plan or policy here
         self.reset()
         if env is None:
@@ -736,8 +743,11 @@ class GurobiOfflineController(BaseAgent):
         self.model.update()
         action_values = self.plan.evaluate(
             self.compiler, params=self.params, step=self.step, subs=subs)
-        action_values = {name: value for (name, value) in action_values.items()
-                         if value != self.compiler.noop_actions[name]}
+        final_action_values = {}
+        for (name, value) in action_values.items():
+            if value != self.compiler.noop_actions[name]:
+                lower, upper = self.compiler.bounds.get(name, UNBOUNDED)
+                final_action_values[name] = min(upper, max(lower, value))
         
         self.step += 1
         return action_values
@@ -778,6 +788,15 @@ class GurobiOnlineController(BaseAgent):
         self.rddl = rddl
         self.plan = plan
         self.compiler = GurobiRDDLCompiler(rddl=rddl, plan=plan, **compiler_kwargs)
+        
+        # try to use the preconditions to produce narrow action bounds
+        action_bounds = self.plan.action_bounds.copy()
+        for name in self.compiler.rddl.action_fluents:
+            if name not in action_bounds:
+                action_bounds[name] = self.compiler.bounds.get(name, UNBOUNDED)
+        self.plan.action_bounds = action_bounds
+        
+        # make the Gurobi environment
         if env is None:
             env = gurobipy.Env()
         self.env = env
@@ -804,10 +823,14 @@ class GurobiOnlineController(BaseAgent):
         # evaluate policy at the current time step with current inputs
         action_values = self.plan.evaluate(
             self.compiler, params=params, step=0, subs=subs)
-        action_values = {name: value for (name, value) in action_values.items()
-                         if value != self.compiler.noop_actions[name]}
+        final_action_values = {}
+        for (name, value) in action_values.items():
+            if value != self.compiler.noop_actions[name]:
+                lower, upper = self.compiler.bounds.get(name, UNBOUNDED)
+                final_action_values[name] = min(upper, max(lower, value))
+                
         del model
-        return action_values
+        return final_action_values
         
     def reset(self) -> None:
         pass

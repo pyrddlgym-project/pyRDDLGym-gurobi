@@ -10,6 +10,7 @@ from pyRDDLGym.core.compiler.initializer import RDDLValueInitializer
 from pyRDDLGym.core.compiler.levels import RDDLLevelAnalysis
 from pyRDDLGym.core.compiler.model import RDDLLiftedModel
 from pyRDDLGym.core.compiler.tracer import RDDLObjectsTracer
+from pyRDDLGym.core.constraints import RDDLConstraints
 from pyRDDLGym.core.debug.exception import (
     raise_warning,
     print_stack_trace,
@@ -19,7 +20,7 @@ from pyRDDLGym.core.debug.exception import (
 )
 from pyRDDLGym.core.debug.logger import Logger
 from pyRDDLGym.core.grounder import RDDLGrounder
-from pyRDDLGym.core.simulator import lngamma
+from pyRDDLGym.core.simulator import lngamma, RDDLSimulatorPrecompiled
 
 if TYPE_CHECKING:
     from pyRDDLGym_gurobi.core.planner import GurobiPlan
@@ -106,7 +107,16 @@ class GurobiRDDLCompiler:
         for (var, values) in self.init_values.items():
             if self.rddl.variable_types[var] == 'action-fluent':
                 self.noop_actions[var] = values
-    
+                
+        # calculate simple bounds on actions
+        # TODO: use the improved interval analysis
+        simulator = RDDLSimulatorPrecompiled(
+            self.rddl, 
+            init_values=self.init_values, 
+            levels=self.levels,
+            trace_info=self.traced)
+        self.bounds = RDDLConstraints(simulator).bounds
+        
     def summarize_hyperparameters(self) -> None:
         print(f'Gurobi compiler hyper-params:\n'
               f'    float_range       ={self.float_range}\n'
