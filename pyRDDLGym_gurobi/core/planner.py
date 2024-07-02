@@ -812,9 +812,10 @@ class GurobiOnlineController(BaseAgent):
         # optimize the policy parameters at the current time step
         model, _, params = self.compiler.compile(subs, env=self.env)
         model.optimize()
+        self.solved = model.SolCount > 0
         
         # check for existence of solution
-        if not (model.SolCount > 0):
+        if not self.solved:
             raise_warning('Gurobi failed to find a feasible solution '
                           'in the given time limit: using no-op action.', 'red')
             del model
