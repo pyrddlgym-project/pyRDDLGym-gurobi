@@ -119,6 +119,7 @@ class GurobiRDDLCompiler:
         
     def summarize_hyperparameters(self) -> None:
         print(f'Gurobi compiler hyper-params:\n'
+              f'    plan              ={type(self.plan).__name__}\n'
               f'    float_range       ={self.float_range}\n'
               f'    float_equality_tol={self.epsilon}\n'
               f'    lookahead_horizon ={self.horizon}\n'
