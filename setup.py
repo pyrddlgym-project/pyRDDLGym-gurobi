@@ -25,14 +25,14 @@ setup(
       url="https://github.com/pyrddlgym-project/pyRDDLGym-gurobi",
       packages=find_packages(),
       install_requires=[
-          'pyRDDLGym>=2.0.0',
+          'pyRDDLGym>=2.0',
           'gurobipy>=10.0.0' 
         ],
       python_requires=">=3.8",
       package_data={'': ['*.cfg']},
       include_package_data=True,
       classifiers=[
-        "Development Status :: 3 - Alpha",
+        "Development Status :: 4 - Beta",
         "Intended Audience :: Science/Research",
         "License :: OSI Approved :: MIT License",
         "Natural Language :: English",
