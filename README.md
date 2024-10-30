@@ -21,20 +21,11 @@ This repository supports compilation of RDDL description files into Gurobi's mix
 
 ## Installation
 
-The basic requirements are ``pyRDDLGym>=2.0`` and ``gurobipy>=10.0.1``. To run the basic example, you will also require ``rddlrepository>=2.0``. Everything can be installed (assuming Anaconda):
+The basic requirements are ``pyRDDLGym>=2.0`` and ``gurobipy>=10.0.0``. 
+To run the basic example, you will also require ``rddlrepository>=2.0``. Everything except rddlrepository can be installed via pip:
 
 ```shell
-# Create a new conda environment
-conda create -n gurobiplan python=3.11
-conda activate gurobiplan
-conda install pip git
-
-# Manually install pyRDDLGym and rddlrepository
-pip install git+https://github.com/pyrddlgym-project/pyRDDLGym
-pip install git+https://github.com/pyrddlgym-project/rddlrepository
-
-# Install pyRDDLGym-gurobi
-pip install git+https://github.com/pyrddlgym-project/pyRDDLGym-gurobi
+pip install pyRDDLGym-gurobi
 ```
 
 ## Running the Basic Example
