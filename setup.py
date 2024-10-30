@@ -14,6 +14,8 @@
 
 from setuptools import setup, find_packages
 
+from pathlib import Path
+long_description = (Path(__file__).parent / "README.md").read_text()
 
 setup(
       name='pyRDDLGym-gurobi',
@@ -21,6 +23,8 @@ setup(
       author="Michael Gimelfarb, Ayal Taitler, Scott Sanner",
       author_email="mike.gimelfarb@mail.utoronto.ca, ataitler@gmail.com, ssanner@mie.utoronto.ca",
       description="pyRDDLGym-gurobi: Gurobi compilation of RDDL description files, and optimization tools.",
+      long_description=long_description,
+      long_description_content_type='text/markdown',
       license="MIT License",
       url="https://github.com/pyrddlgym-project/pyRDDLGym-gurobi",
       packages=find_packages(),
