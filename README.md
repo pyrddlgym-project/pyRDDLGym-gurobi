@@ -34,13 +34,12 @@ The basic example provided in pyRDDLGym-gurobi will run the Gurobi planner on a 
 To run this, navigate to the install directory of pyRDDLGym-gurobi, and run:
 
 ```shell
-python -m pyRDDLGym_gurobi.examples.run_plan <domain> <instance> <horizon>
+python -m pyRDDLGym_gurobi.examples.run_plan <domain> <instance>
 ```
 
 where:
 - ``<domain>`` is the domain identifier as specified in rddlrepository (i.e. Wildfire_MDP_ippc2014), or a path pointing to a valid ``domain.rddl`` file
 - ``<instance>`` instance is the instance identifier (i.e. 1, 2, ... 10) in rddlrepository, or a path pointing to a valid ``instance.rddl`` file
-- ``<horizon>`` is the planning lookahead horizon.
 
 ## Running from the Python API
 
@@ -63,30 +62,37 @@ controller.evaluate(env, episodes=1, verbose=True, render=True)
 
 Note, that the ``GurobiOnlineController`` is an instance of pyRDDLGym's ``BaseAgent``, so the ``evaluate()`` function can be used to streamline interaction with the environment.
 
-## Customizing Gurobi
+## Configuring pyRDDLGym-gurobi
 
-The Gurobi compiler and planner run using the Gurobi engine and can be configured by configuring Gurobipy. 
+The recommended way to manage planner settings is to write a configuration file with all the necessary hyper-parameters, which follows the same general format as for the JAX planner. Below is the basic structure of a configuration file for straight-line planning:
 
-### Configuration File
+```shell
+[Gurobi]
+NonConvex=2
+OutputFlag=0
 
-Create a ``gurobi.env`` file in the location of your running script, and in it specify the [parameters](https://www.gurobi.com/documentation/current/refman/parameters.html) that you would like to pass to Gurobi.
-For example, to instruct Gurobi to limit each optimization to 60 seconds, and to print progress during optimization to console:
-
-```ini
-TimeLimit 60
-OutputFlag 1
+[Optimizer]
+method='GurobiStraightLinePlan'
+method_kwargs={}
+rollout_horizon=5
+verbose=1
 ```
 
-### Passing Parameters Directly
-
-Parameters can be passed as a dictionary to the ``model_params`` argument of the Gurobi controller:
+The configuration file can then be parsed and passed to the planner as follows:
 
 ```python
-controller = GurobiOnlineController(rddl=env.model, plan=plan, rollout_horizon=5,
-                                    model_params={'NonConvex': 2, 'OutputFlag': 1})
-```
+import os
+from pyRDDLGym_gurobi.core.planner import load_config
 
-and then the controller can be used as described in the previous section.
+# load the config
+abs_path = os.path.dirname(os.path.abspath(__file__))
+config_path = os.path.join(abs_path, 'default.cfg')
+controller_kwargs = load_config(config_path)
+
+# pass the parameters to the controller and proceed as usual
+controller = GurobiOnlineController(rddl=env.model, **controller_kwargs)
+...
+```
 
 ## Citing pyRDDLGym-gurobi
 
