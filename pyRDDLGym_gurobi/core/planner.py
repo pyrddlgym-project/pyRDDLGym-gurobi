@@ -1,4 +1,10 @@
+from ast import literal_eval
+import configparser
+import os
+import sys
 from typing import Any, Dict, List, Tuple, Optional
+
+Kwargs = Dict[str, Any]
 
 import gurobipy
 from gurobipy import GRB
@@ -10,6 +16,70 @@ from pyRDDLGym.core.policy import BaseAgent
 from pyRDDLGym_gurobi.core.compiler import GurobiRDDLCompiler
 
 UNBOUNDED = (-GRB.INFINITY, +GRB.INFINITY)
+
+# ***********************************************************************
+# CONFIG FILE MANAGEMENT
+# 
+# - read config files from file path
+# - extract experiment settings
+# - instantiate planner
+#
+# ***********************************************************************
+
+
+def _parse_config_file(path: str):
+    if not os.path.isfile(path):
+        raise FileNotFoundError(f'File {path} does not exist.')
+    config = configparser.RawConfigParser()
+    config.optionxform = str 
+    config.read(path)
+    args = {k: literal_eval(v) 
+            for section in config.sections()
+            for (k, v) in config.items(section)}
+    return config, args
+
+
+def _parse_config_string(value: str):
+    config = configparser.RawConfigParser()
+    config.optionxform = str 
+    config.read_string(value)
+    args = {k: literal_eval(v) 
+            for section in config.sections()
+            for (k, v) in config.items(section)}
+    return config, args
+
+
+def _getattr_any(packages, item):
+    for package in packages:
+        loaded = getattr(package, item, None)
+        if loaded is not None:
+            return loaded
+    return None
+
+
+def _load_config(config, args):
+    gurobi_args = {k: args[k] for (k, _) in config.items('Gurobi')}
+    compiler_args = {k: args[k] for (k, _) in config.items('Optimizer')}
+    
+    # policy class
+    plan_method = compiler_args.pop('method')
+    plan_kwargs = compiler_args.pop('method_kwargs', {})
+    compiler_args['plan'] = getattr(sys.modules[__name__], plan_method)(**plan_kwargs)
+    compiler_args['model_params'] = gurobi_args
+    
+    return compiler_args
+
+
+def load_config(path: str) -> Kwargs:
+    '''Loads a config file at the specified file path.'''
+    config, args = _parse_config_file(path)
+    return _load_config(config, args)
+
+
+def load_config_from_string(value: str) -> Kwargs:
+    '''Loads config file contents specified explicitly as a string value.'''
+    config, args = _parse_config_string(value)
+    return _load_config(config, args)
 
 
 # ***********************************************************************
@@ -237,7 +307,7 @@ class GurobiPiecewisePolicy(GurobiPlan):
                     lb_name = f'lb__{action}__{k}'
                     ub_name = f'ub__{action}__{k}'                    
                     if values is None:
-                        lb, ub = self.state_bounds[states[0]]
+                        lb, ub = self.state_bounds.get(states[0], UNBOUNDED)
                         var_bounds = UNBOUNDED if is_linear else (lb - 1, ub + 1)
                         lb_var = compiled._add_var(model, vtype, *var_bounds)                        
                         ub_var = compiled._add_var(model, vtype, *var_bounds)
