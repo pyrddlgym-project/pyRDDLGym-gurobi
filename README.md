@@ -14,9 +14,7 @@ This repository supports compilation of RDDL description files into Gurobi's mix
 - [Installation](#installation)
 - [Running the Basic Example](#running-the-basic-example)
 - [Running from the Python API](#running-from-the-python-api)
-- [Customizing Gurobi](#customizing-gurobi)
-  - [Configuration File](#configuration-file)
-  - [Passing Parameters Directly](#passing-parameters-directly)
+- [Configuring pyRDDLGym-gurobi](#configuring-pyrddlgym-gurobi)
 - [Citing pyRDDLGym-gurobi](#citing-pyrddlgym-gurobi)
 
 ## Installation
