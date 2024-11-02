@@ -817,8 +817,12 @@ class GurobiOfflineController(BaseAgent):
         for (name, value) in action_values.items():
             if value != self.compiler.noop_actions[name]:
                 lower, upper = self.compiler.bounds.get(name, UNBOUNDED)
-                final_action_values[name] = min(upper, max(lower, value))
-        
+                if isinstance(value, float):
+                    final_action_values[name] = min(upper, max(lower, value))
+                elif isinstance(value, int):
+                    final_action_values[name] = int(min(upper, max(lower, value)))
+                else:
+                    final_action_values[name] = value                                        
         self.step += 1
         return action_values
                 
@@ -898,8 +902,12 @@ class GurobiOnlineController(BaseAgent):
         for (name, value) in action_values.items():
             if value != self.compiler.noop_actions[name]:
                 lower, upper = self.compiler.bounds.get(name, UNBOUNDED)
-                final_action_values[name] = min(upper, max(lower, value))
-                
+                if isinstance(value, float):
+                    final_action_values[name] = min(upper, max(lower, value))
+                elif isinstance(value, int):
+                    final_action_values[name] = int(min(upper, max(lower, value)))
+                else:
+                    final_action_values[name] = value  
         del model
         return final_action_values
         
