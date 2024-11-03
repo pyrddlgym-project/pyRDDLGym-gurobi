@@ -778,9 +778,9 @@ class GurobiRDDLCompiler:
                 varg1, varg2 = vargs
                 if symb:
                     not1 = self._add_bool_var(
-                        model, name=f'E{expr.id}at{step}tmp1')
+                        model, name=f'E{expr.id}at{step}tmp')
                     model.addConstr(
-                        not1 + varg1 == 1, name=f'C{expr.id}at{step}tmp1')                                                  
+                        not1 + varg1 == 1, name=f'C{expr.id}at{step}tmp')                                                  
                     res = self._add_bool_var(
                         model, name=f'E{expr.id}at{step}imply')
                     model.addGenConstrOr(
@@ -807,10 +807,10 @@ class GurobiRDDLCompiler:
         else:
             return math.log(x)
     
-    def _gurobi_positive(self, model, varg, vtype, lb, ub):
+    def _gurobi_positive(self, model, varg, vtype, lb, ub, name=''):
         lb, ub = max(lb, 0), max(ub, 0)
-        res = self._add_var(model, vtype, lb, ub)
-        model.addGenConstrMax(res, [varg], constant=0)
+        res = self._add_var(model, vtype, lb, ub, name=f'E{name}')
+        model.addGenConstrMax(res, [varg], constant=0, name=f'C{name}')
         return res, lb, ub
                     
     def _gurobi_function(self, expr, model, subs, step):
@@ -970,7 +970,8 @@ class GurobiRDDLCompiler:
             
             elif name == 'ln': 
                 if symb:
-                    arg, lb, ub = self._gurobi_positive(model, varg, vtype, lb, ub)                    
+                    arg, lb, ub = self._gurobi_positive(
+                        model, varg, vtype, lb, ub, name=f'{expr.id}at{step}tmp')                    
                     lb, ub = GurobiRDDLCompiler._fix_bounds(
                         GurobiRDDLCompiler._log(lb), GurobiRDDLCompiler._log(ub))
                     res = self._add_real_var(
@@ -985,7 +986,8 @@ class GurobiRDDLCompiler:
             
             elif name == 'sqrt':
                 if symb: 
-                    arg, lb, ub = self._gurobi_positive(model, varg, vtype, lb, ub)                    
+                    arg, lb, ub = self._gurobi_positive(
+                        model, varg, vtype, lb, ub, name=f'{expr.id}at{step}tmp')                    
                     lb, ub = GurobiRDDLCompiler._fix_bounds(
                         math.sqrt(lb), math.sqrt(ub))
                     res = self._add_real_var(
@@ -1035,7 +1037,9 @@ class GurobiRDDLCompiler:
                 if symb: 
                     # argument must be non-negative
                     base, lb1, ub1 = self._gurobi_positive(
-                        model, varg1, vtype1, lb1, ub1)   
+                        model, varg1, vtype1, lb1, ub1, 
+                        name=f'{expr.id}at{step}tmp'
+                    )   
                                         
                     # compute bounds on pow
                     loglb = GurobiRDDLCompiler._log(lb1)
@@ -1059,14 +1063,16 @@ class GurobiRDDLCompiler:
                 if symb:
                     # second argument must be non-negative
                     varg2, lb2, ub2 = self._gurobi_positive(
-                        model, varg2, vtype2, lb2, ub2)  
+                        model, varg2, vtype2, lb2, ub2, 
+                        name=f'{expr.id}at{step}tmp1'
+                    )  
                     
                     # compute r = x % y as x = y * q + r where 0 <= r < y
                     lb, ub = 0, max(0, ub2 - 1)
                     res = self._add_int_var(
                         model, lb, ub, name=f'E{expr.id}at{step}mod')
                     quotient = self._add_int_var(
-                        model, name=f'E{expr.id}at{step}tmp')
+                        model, name=f'E{expr.id}at{step}tmp2')
                     model.addConstr(
                         varg1 == varg2 * quotient + res, 
                         name=f'C{expr.id}at{step}mod'
@@ -1079,14 +1085,16 @@ class GurobiRDDLCompiler:
                 if symb:
                     # second argument must be non-negative
                     varg2, lb2, ub2 = self._gurobi_positive(
-                        model, varg2, vtype2, lb2, ub2)  
+                        model, varg2, vtype2, lb2, ub2, 
+                        name=f'{expr.id}at{step}tmp1'
+                    )  
                     
                     # compute r = x % y as x = y * q + r where 0 <= r < y
                     lb, ub = 0, max(0, ub2 - self.epsilon)
                     res = self._add_real_var(
                         model, lb, ub, name=f'E{expr.id}at{step}fmod')
                     quotient = self._add_int_var(
-                        model, name=f'E{expr.id}at{step}tmp')
+                        model, name=f'E{expr.id}at{step}tmp2')
                     model.addConstr(
                         varg1 == varg2 * quotient + res, 
                         name=f'C{expr.id}at{step}fmod'
@@ -1106,8 +1114,12 @@ class GurobiRDDLCompiler:
                     else:
                         lb2, ub2 = 0.0, max(lb2 ** 2, ub2 ** 2)
                     lb, ub = GurobiRDDLCompiler._fix_bounds(lb1 + lb2, ub1 + ub2)
-                    ssq = self._add_real_var(model, lb, ub)
-                    model.addConstr(ssq == varg1 * varg1 + varg2 * varg2)        
+                    ssq = self._add_real_var(
+                        model, lb, ub, name=f'E{expr.id}at{step}tmp')
+                    model.addConstr(
+                        ssq == varg1 * varg1 + varg2 * varg2, 
+                        name=f'C{expr.id}at{step}tmp'
+                    )        
                                 
                     lb, ub = GurobiRDDLCompiler._fix_bounds(
                         math.sqrt(lb), math.sqrt(ub))
