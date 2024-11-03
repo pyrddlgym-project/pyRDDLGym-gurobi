@@ -481,35 +481,45 @@ class GurobiRDDLCompiler:
                 if sumsymb:
                     res = self._add_var(
                         model, sumvtype, sumlb, sumub, 
-                        name=f'E{expr.id}at{step}sum'
+                        name=f'E{expr.id}at{step}add'
                     )
                     model.addConstr(
-                        res == sumexpr, name=f'C{expr.id}at{step}sum')
+                        res == sumexpr, name=f'C{expr.id}at{step}add')
                 else:
                     res = sumlb = sumub = sumexpr
                 return res, sumvtype, sumlb, sumub, sumsymb
             
             # unwrap multiplication to binary operations
             elif op == '*':
-                prodexpr, prodvtype, prodlb, produb, prodsymb = results[0]
-                prodvtype = GurobiRDDLCompiler._at_least_int(prodvtype)
-                for (varg, vtype, lb, ub, symb) in results[1:]:
-                    prodexpr = prodexpr * varg
-                    prodvtype = GurobiRDDLCompiler._promote_vtype(prodvtype, vtype)
-                    prodlb, produb = GurobiRDDLCompiler._fix_bounds_prod(prodlb, produb, lb, ub)
-                    prodsymb = prodsymb or symb
                 
-                # assign product to a new variable
-                if prodsymb: 
-                    res = self._add_var(
-                        model, prodvtype, prodlb, produb, 
-                        name=f'E{expr.id}at{step}prod'
-                    )
-                    model.addConstr(
-                        res == prodexpr, name=f'C{expr.id}at{step}prod')
-                else:
-                    res = prodlb = produb = prodexpr                    
-                return res, prodvtype, prodlb, produb, prodsymb
+                # accumulate the non-symbolic terms
+                prodexpr = 1
+                prodvtype = GRB.INTEGER
+                for (varg, vtype, lb, ub, symb) in results:
+                    if not symb:
+                        prodexpr *= varg
+                        prodvtype = GurobiRDDLCompiler._promote_vtype(prodvtype, vtype)
+                
+                # accumulate the symbolic terms
+                prodlb = produb = prodexpr
+                prodsymb = False
+                for (i, (varg, vtype, lb, ub, symb)) in enumerate(results):
+                    if symb:
+                        prodexpr = prodexpr * varg
+                        prodvtype = GurobiRDDLCompiler._promote_vtype(prodvtype, vtype)
+                        prodlb, produb = GurobiRDDLCompiler._fix_bounds_prod(prodlb, produb, lb, ub)
+                        prodsymb = True
+                
+                        # assign product to a new variable
+                        prodvar = self._add_var(
+                            model, prodvtype, prodlb, produb,
+                            name=f'E{expr.id}at{step}mul{i}'
+                        )
+                        model.addConstr(
+                            prodvar == prodexpr, name=f'C{expr.id}at{step}mul{i}')
+                        prodexpr = prodvar
+                   
+                return prodexpr, prodvtype, prodlb, produb, prodsymb
             
             # subtraction
             elif n == 2 and op == '-':
@@ -594,11 +604,16 @@ class GurobiRDDLCompiler:
             if op == '==' or op == '~=': 
                 if symb:
                     lb, ub = GurobiRDDLCompiler._fix_bounds(lb1 - ub2, ub1 - lb2)
-                    vdiff = self._add_var(model, vtype, lb, ub)
-                    model.addConstr(vdiff == varg1 - varg2)                    
+                    vdiff = self._add_var(
+                        model, vtype, lb, ub, name=f'E{expr.id}at{step}tmp1')
+                    model.addConstr(
+                        vdiff == varg1 - varg2, name=f'C{expr.id}at{step}tmp1')   
+                                     
                     lb, ub = GurobiRDDLCompiler._fix_bounds_abs(lb, ub)
-                    vabsdiff = self._add_var(model, vtype, lb, ub)
-                    model.addGenConstrAbs(vabsdiff, vdiff)
+                    vabsdiff = self._add_var(
+                        model, vtype, lb, ub, name=f'E{expr.id}at{step}tmp2')
+                    model.addGenConstrAbs(
+                        vabsdiff, vdiff, name=f'C{expr.id}at{step}tmp2')
                     
                     if op == '==':
                         res = self._add_bool_var(
@@ -729,8 +744,10 @@ class GurobiRDDLCompiler:
                                 f'Constant expression is of type '
                                 f'{type(varg)}, expected bool or np.bool_' + 
                                 '\n' + print_stack_trace(args[i]))
-                        var = self._add_bool_var(model)
-                        model.addConstr(var == bool(varg))
+                        var = self._add_bool_var(
+                            model, name=f'E{expr.id}at{step}tmp{i}')
+                        model.addConstr(
+                            var == bool(varg), name=f'C{expr.id}at{step}tmp{i}')
                         vargs[i] = var
                         symbs[i] = True
             
@@ -760,8 +777,10 @@ class GurobiRDDLCompiler:
             elif op == '=>' and n == 2:
                 varg1, varg2 = vargs
                 if symb:
-                    not1 = self._add_bool_var(model)
-                    model.addConstr(not1 + varg1 == 1)                                                  
+                    not1 = self._add_bool_var(
+                        model, name=f'E{expr.id}at{step}tmp1')
+                    model.addConstr(
+                        not1 + varg1 == 1, name=f'C{expr.id}at{step}tmp1')                                                  
                     res = self._add_bool_var(
                         model, name=f'E{expr.id}at{step}imply')
                     model.addGenConstrOr(
@@ -824,12 +843,28 @@ class GurobiRDDLCompiler:
                         res = lb = ub = -1
                         symb = False
                     else:
-                        pos = self._add_bool_var(model)
-                        model.addConstr((pos == 1) >> (varg >= self.epsilon))
-                        model.addConstr((pos == 0) >> (varg <= 0))
-                        neg = self._add_bool_var(model)
-                        model.addConstr((neg == 1) >> (varg <= -self.epsilon))
-                        model.addConstr((neg == 0) >> (varg >= 0))
+                        pos = self._add_bool_var(
+                            model, name=f'E{expr.id}at{step}tmp1')
+                        model.addConstr(
+                            (pos == 1) >> (varg >= self.epsilon), 
+                            name=f'C{expr.id}at{step}tmp1l'
+                        )
+                        model.addConstr(
+                            (pos == 0) >> (varg <= 0), 
+                            name=f'C{expr.id}at{step}tmp1u'
+                        )
+                        
+                        neg = self._add_bool_var(
+                            model, name=f'E{expr.id}at{step}tmp2')
+                        model.addConstr(
+                            (neg == 1) >> (varg <= -self.epsilon), 
+                            name=f'C{expr.id}at{step}tmp2u'
+                        )
+                        model.addConstr(
+                            (neg == 0) >> (varg >= 0), 
+                            name=f'C{expr.id}at{step}tmp2l'
+                        )
+                        
                         res = self._add_int_var(
                             model, lb=-1, ub=1, name=f'E{expr.id}at{step}sgn')
                         model.addConstr(
@@ -1030,7 +1065,8 @@ class GurobiRDDLCompiler:
                     lb, ub = 0, max(0, ub2 - 1)
                     res = self._add_int_var(
                         model, lb, ub, name=f'E{expr.id}at{step}mod')
-                    quotient = self._add_int_var(model)
+                    quotient = self._add_int_var(
+                        model, name=f'E{expr.id}at{step}tmp')
                     model.addConstr(
                         varg1 == varg2 * quotient + res, 
                         name=f'C{expr.id}at{step}mod'
@@ -1049,7 +1085,8 @@ class GurobiRDDLCompiler:
                     lb, ub = 0, max(0, ub2 - self.epsilon)
                     res = self._add_real_var(
                         model, lb, ub, name=f'E{expr.id}at{step}fmod')
-                    quotient = self._add_int_var(model)
+                    quotient = self._add_int_var(
+                        model, name=f'E{expr.id}at{step}tmp')
                     model.addConstr(
                         varg1 == varg2 * quotient + res, 
                         name=f'C{expr.id}at{step}fmod'
