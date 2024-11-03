@@ -1057,6 +1057,32 @@ class GurobiRDDLCompiler:
                 else:
                     res = lb = ub = varg1 % varg2
                 return res, GRB.CONTINUOUS, lb, ub, symb
+            
+            elif name == 'hypot':
+                if symb:
+                    if lb1 >= 0 or ub1 <= 0:
+                        lb1, ub1 = min(lb1 ** 2, ub1 ** 2), max(lb1 ** 2, ub1 ** 2)
+                    else:
+                        lb1, ub1 = 0.0, max(lb1 ** 2, ub1 ** 2)
+                    if lb2 >= 0 or ub2 <= 0:
+                        lb2, ub2 = min(lb2 ** 2, ub2 ** 2), max(lb2 ** 2, ub2 ** 2)
+                    else:
+                        lb2, ub2 = 0.0, max(lb2 ** 2, ub2 ** 2)
+                    lb, ub = GurobiRDDLCompiler._fix_bounds(lb1 + lb2, ub1 + ub2)
+                    ssq = self._add_real_var(model, lb, ub)
+                    model.addConstr(ssq == varg1 * varg1 + varg2 * varg2)        
+                                
+                    lb, ub = GurobiRDDLCompiler._fix_bounds(
+                        math.sqrt(lb), math.sqrt(ub))
+                    res = self._add_real_var(
+                        model, lb, ub, name=f'E{expr.id}at{step}hypot')
+                    model.addGenConstrPow(
+                        ssq, res, 0.5, 
+                        options=self.pw_options, name=f'C{expr.id}at{step}hypot'
+                    )
+                else:
+                    res = lb = ub = math.sqrt(varg1 ** 2 + varg2 ** 2)
+                return res, GRB.CONTINUOUS, lb, ub, symb
                 
         raise RDDLNotImplementedError(
             f'Function operator {name} with {n} arguments is not '
