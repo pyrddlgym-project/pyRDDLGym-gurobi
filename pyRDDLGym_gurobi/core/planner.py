@@ -1,6 +1,7 @@
 from ast import literal_eval
 import configparser
 import os
+import re
 import sys
 from typing import Any, Dict, List, Tuple, Optional
 
@@ -181,7 +182,10 @@ class GurobiStraightLinePlan(GurobiPlan):
             for step in range(compiled.horizon):
                 name = f'{action}__{step}'
                 if values is None:
-                    var = compiled._add_var(model, atype, *bounds)
+                    ascii_name = re.sub(
+                        '[^A-z0-9 -]', '', action).replace(" ", "")
+                    var = compiled._add_var(model, atype, *bounds,
+                                            name=f'{ascii_name}at{step}')
                     action_vars[name] = (var, atype, *bounds, True)
                 else:
                     value = values[name]
