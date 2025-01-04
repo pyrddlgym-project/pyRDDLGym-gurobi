@@ -1,21 +1,17 @@
 # pyRDDLGym-gurobi
 
-Author: [Mike Gimelfarb](https://mike-gimelfarb.github.io)
+![Python Version](https://img.shields.io/badge/python-3.8%2B-blue)
+[![PyPI Version](https://img.shields.io/pypi/v/pyRDDLGym-gurobi.svg)](https://pypi.org/project/pyRDDLGym-gurobi/)
+[![Documentation Status](https://readthedocs.org/projects/pyrddlgym/badge/?version=latest)](https://pyrddlgym.readthedocs.io/en/latest/gurobi.html)
+![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)
 
-This repository supports compilation of RDDL description files into Gurobi's mixed-integer (non-linear) programs, and automated planning tools for optimizing these programs in MDPs.
+[Installation](#installation) | [Basic Example](#running-the-basic-example) | [Running Python](#running-from-the-python-api) | [Configuration](#configuring-pyrddlgym-gurobi) | [Citing](#citing-pyrddlgym-gurobi)
+
+Supports compilation of RDDL description files into Gurobi mixed-integer (non-linear) programs, and automated planning tools for optimizing these programs in MDPs.
 
 > [!NOTE]  
 > The Gurobi planners currently determinize all stochastic variables, making it less suitable for highly stochastic problems or problems with (stochastic) dead ends.
 > If you find it is not making sufficient progress on a stochastic problem, or doesn't scale well computationally to your problem, check out the [PROST planner](https://github.com/pyrddlgym-project/pyRDDLGym-prost) (for discrete spaces), the [JAX planner](https://github.com/pyrddlgym-project/pyRDDLGym-jax) (for continuous problems), or the [deep reinforcement learning wrappers](https://github.com/pyrddlgym-project/pyRDDLGym-rl).
-
-
-## Contents
-
-- [Installation](#installation)
-- [Running the Basic Example](#running-the-basic-example)
-- [Running from the Python API](#running-from-the-python-api)
-- [Configuring pyRDDLGym-gurobi](#configuring-pyrddlgym-gurobi)
-- [Citing pyRDDLGym-gurobi](#citing-pyrddlgym-gurobi)
 
 ## Installation
 
