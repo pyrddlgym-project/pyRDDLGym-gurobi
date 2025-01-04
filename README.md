@@ -4,6 +4,7 @@
 [![PyPI Version](https://img.shields.io/pypi/v/pyRDDLGym-gurobi.svg)](https://pypi.org/project/pyRDDLGym-gurobi/)
 [![Documentation Status](https://readthedocs.org/projects/pyrddlgym/badge/?version=latest)](https://pyrddlgym.readthedocs.io/en/latest/gurobi.html)
 ![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)
+![Cumulative PyPI Downloads](https://img.shields.io/pypi/dm/pyrddlgym-gurobi)
 
 [Installation](#installation) | [Basic Example](#running-the-basic-example) | [Running Python](#running-from-the-python-api) | [Configuration](#configuring-pyrddlgym-gurobi) | [Citing](#citing-pyrddlgym-gurobi)
 
