@@ -1,6 +1,7 @@
 from ast import literal_eval
 import configparser
 import os
+import re
 import sys
 from typing import Any, Dict, List, Tuple, Optional
 
@@ -181,7 +182,10 @@ class GurobiStraightLinePlan(GurobiPlan):
             for step in range(compiled.horizon):
                 name = f'{action}__{step}'
                 if values is None:
-                    var = compiled._add_var(model, atype, *bounds)
+                    ascii_name = re.sub(
+                        '[^A-z0-9 -]', '', action).replace(" ", "")
+                    var = compiled._add_var(model, atype, *bounds,
+                                            name=f'{ascii_name}at{step}')
                     action_vars[name] = (var, atype, *bounds, True)
                 else:
                     value = values[name]
@@ -817,8 +821,12 @@ class GurobiOfflineController(BaseAgent):
         for (name, value) in action_values.items():
             if value != self.compiler.noop_actions[name]:
                 lower, upper = self.compiler.bounds.get(name, UNBOUNDED)
-                final_action_values[name] = min(upper, max(lower, value))
-        
+                if isinstance(value, float):
+                    final_action_values[name] = min(upper, max(lower, value))
+                elif isinstance(value, int):
+                    final_action_values[name] = int(min(upper, max(lower, value)))
+                else:
+                    final_action_values[name] = value                                        
         self.step += 1
         return action_values
                 
@@ -898,8 +906,12 @@ class GurobiOnlineController(BaseAgent):
         for (name, value) in action_values.items():
             if value != self.compiler.noop_actions[name]:
                 lower, upper = self.compiler.bounds.get(name, UNBOUNDED)
-                final_action_values[name] = min(upper, max(lower, value))
-                
+                if isinstance(value, float):
+                    final_action_values[name] = min(upper, max(lower, value))
+                elif isinstance(value, int):
+                    final_action_values[name] = int(min(upper, max(lower, value)))
+                else:
+                    final_action_values[name] = value  
         del model
         return final_action_values
         

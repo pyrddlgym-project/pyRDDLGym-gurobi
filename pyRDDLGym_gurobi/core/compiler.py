@@ -109,7 +109,6 @@ class GurobiRDDLCompiler:
                 self.noop_actions[var] = values
                 
         # calculate simple bounds on actions
-        # TODO: use the improved interval analysis
         simulator = RDDLSimulatorPrecompiled(
             self.rddl, 
             init_values=self.init_values, 
@@ -188,15 +187,15 @@ class GurobiRDDLCompiler:
             subs.update(action_vars)
             
             # add action constraints
-            self._compile_maxnondef_constraint(model, subs)
-            self._compile_action_preconditions(model, subs)
+            self._compile_maxnondef_constraint(model, subs, step)
+            self._compile_action_preconditions(model, subs, step)
             
             # add constraint on state for the first step
-            self._compile_state_invariants(model, subs)
+            self._compile_state_invariants(model, subs, step)
                 
             # evaluate CPFs and reward
-            self._compile_cpfs(model, subs)
-            reward, (lbr, ubr) = self._compile_reward(model, subs)
+            self._compile_cpfs(model, subs, step)
+            reward, (lbr, ubr) = self._compile_reward(model, subs, step)
             discount = self.discount ** step
             objective += reward * discount
             
@@ -263,19 +262,19 @@ class GurobiRDDLCompiler:
             subs[var] = (safe_value, vtype, lb, ub, False)
         return subs
         
-    def _compile_action_preconditions(self, model, subs) -> None:
-        for precondition in self.rddl.preconditions:
-            indicator, *_, symb = self._gurobi(precondition, model, subs)
+    def _compile_action_preconditions(self, model, subs, step) -> None:
+        for (i, precondition) in enumerate(self.rddl.preconditions):
+            indicator, *_, symb = self._gurobi(precondition, model, subs, step)
             if symb:
-                model.addConstr(indicator == 1)
+                model.addConstr(indicator == 1, name=f'precond{i}at{step}')
     
-    def _compile_state_invariants(self, model, subs) -> None:
-        for invariant in self.rddl.invariants:
-            indicator, *_, symb = self._gurobi(invariant, model, subs)
+    def _compile_state_invariants(self, model, subs, step) -> None:
+        for (i, invariant) in enumerate(self.rddl.invariants):
+            indicator, *_, symb = self._gurobi(invariant, model, subs, step)
             if symb:
-                model.addConstr(indicator == 1)
+                model.addConstr(indicator == 1, name=f'invariant{i}at{step}')
         
-    def _compile_maxnondef_constraint(self, model, subs) -> None:
+    def _compile_maxnondef_constraint(self, model, subs, step) -> None:
         rddl = self.rddl
         num_bool, sum_bool = 0, 0
         for (action, prange) in rddl.action_ranges.items():
@@ -284,17 +283,18 @@ class GurobiRDDLCompiler:
                 num_bool += 1
                 sum_bool += var
         if rddl.max_allowed_actions < num_bool:
-            model.addConstr(sum_bool <= rddl.max_allowed_actions)
+            model.addConstr(
+                sum_bool <= rddl.max_allowed_actions, name=f'concurrent{step}')
             
-    def _compile_cpfs(self, model, subs) -> None:
+    def _compile_cpfs(self, model, subs, step) -> None:
         rddl = self.rddl
         for cpfs in self.levels.values():
             for cpf in cpfs:
                 _, expr = rddl.cpfs[cpf]
-                subs[cpf] = self._gurobi(expr, model, subs)
+                subs[cpf] = self._gurobi(expr, model, subs, step)
     
-    def _compile_reward(self, model, subs) -> tuple:
-        reward, _, lb, ub, _ = self._gurobi(self.rddl.reward, model, subs)
+    def _compile_reward(self, model, subs, step) -> tuple:
+        reward, _, lb, ub, _ = self._gurobi(self.rddl.reward, model, subs, step)
         return reward, (lb, ub)
     
     # ===========================================================================
@@ -303,24 +303,24 @@ class GurobiRDDLCompiler:
     
     # IMPORTANT: all helper methods below must return either a Gurobi variable
     # or a constant as the first argument
-    def _gurobi(self, expr, model, subs):
+    def _gurobi(self, expr, model, subs, step):
         etype, _ = expr.etype
         if etype == 'constant':
-            return self._gurobi_constant(expr, model, subs)
+            return self._gurobi_constant(expr, model, subs, step)
         elif etype == 'pvar':
-            return self._gurobi_pvar(expr, model, subs)
+            return self._gurobi_pvar(expr, model, subs, step)
         elif etype == 'arithmetic':
-            return self._gurobi_arithmetic(expr, model, subs)
+            return self._gurobi_arithmetic(expr, model, subs, step)
         elif etype == 'relational':
-            return self._gurobi_relational(expr, model, subs)
+            return self._gurobi_relational(expr, model, subs, step)
         elif etype == 'boolean':
-            return self._gurobi_logical(expr, model, subs)
+            return self._gurobi_logical(expr, model, subs, step)
         elif etype == 'func':
-            return self._gurobi_function(expr, model, subs)
+            return self._gurobi_function(expr, model, subs, step)
         elif etype == 'control':
-            return self._gurobi_control(expr, model, subs)
+            return self._gurobi_control(expr, model, subs, step)
         elif etype == 'randomvar':
-            return self._gurobi_random(expr, model, subs)
+            return self._gurobi_random(expr, model, subs, step)
         else:
             raise RDDLNotImplementedError(
                 f'Expression type {etype} is not supported in Gurobi compiler.\n' + 
@@ -357,12 +357,11 @@ class GurobiRDDLCompiler:
     
     @staticmethod
     def _fix_bounds_abs(lb, ub):
-        if lb >= 0:
-            pass
-        elif ub <= 0:
-            lb, ub = -ub, -lb
-        else:
-            lb, ub = 0, max(abs(lb), abs(ub))
+        if lb < 0:
+            if ub <= 0:
+                lb, ub = -ub, -lb
+            else:
+                lb, ub = 0, max(abs(lb), abs(ub))
         return GurobiRDDLCompiler._fix_bounds(lb, ub)
     
     @staticmethod
@@ -384,7 +383,7 @@ class GurobiRDDLCompiler:
                 GurobiRDDLCompiler._fix_product_underflow(ub1, ub2))
         return GurobiRDDLCompiler._fix_bounds(min(lbub), max(lbub))
         
-    def _gurobi_constant(self, expr, model, subs):
+    def _gurobi_constant(self, expr, model, subs, step):
         
         # get the cached value of this constant
         value = self.traced.cached_sim_info(expr)
@@ -404,7 +403,7 @@ class GurobiRDDLCompiler:
         lb, ub = GurobiRDDLCompiler._fix_bounds(value, value)
         return lb, vtype, lb, ub, False
 
-    def _gurobi_pvar(self, expr, model, subs):
+    def _gurobi_pvar(self, expr, model, subs, step):
         var, _ = expr.args
         
         # domain object converted to canonical index
@@ -443,7 +442,7 @@ class GurobiRDDLCompiler:
     def _at_least_int(vtype):
         return GurobiRDDLCompiler._promote_vtype(vtype, GRB.INTEGER)
     
-    def _gurobi_arithmetic(self, expr, model, subs):
+    def _gurobi_arithmetic(self, expr, model, subs, step):
         _, op = expr.etype
         args = expr.args        
         n = len(args)
@@ -451,85 +450,92 @@ class GurobiRDDLCompiler:
         # unary negation
         if n == 1 and op == '-':
             arg, = args
-            gterm, vtype, lb, ub, symb = self._gurobi(arg, model, subs)
+            varg, vtype, lb, ub, symb = self._gurobi(arg, model, subs, step)
             vtype = GurobiRDDLCompiler._at_least_int(vtype)
             lb, ub = GurobiRDDLCompiler._fix_bounds(-1 * ub, -1 * lb)
-            negexpr = -1 * gterm
             
             # assign negative to a new variable
             if symb: 
-                res = self._add_var(model, vtype, lb, ub)
-                model.addConstr(res == negexpr)
+                key = f'{expr.id}at{step}neg'
+                res = self._add_var(model, vtype, lb, ub, name=f'V{key}')
+                model.addConstr(res + varg == 0, name=f'C{key}')
             else:
-                res = lb = ub = negexpr           
+                res = lb = ub = -1 * varg           
             return res, vtype, lb, ub, symb
         
         # binary operations
         elif n >= 1:
-            results = [self._gurobi(arg, model, subs) for arg in args]
+            results = [self._gurobi(arg, model, subs, step) for arg in args]
             
             # unwrap addition to binary operations
             if op == '+':
-                sumexpr, vtype, lb, ub, symb = results[0]
-                vtype = GurobiRDDLCompiler._at_least_int(vtype)
-                res = sumexpr
-                for (gterm2, vtype2, lb2, ub2, symb2) in results[1:]:
-                    sumexpr = sumexpr + gterm2
-                    vtype = GurobiRDDLCompiler._promote_vtype(vtype, vtype2)
-                    lb, ub = GurobiRDDLCompiler._fix_bounds(lb + lb2, ub + ub2)
-                    symb = symb or symb2
+                sumexpr, sumvtype, sumlb, sumub, sumsymb = results[0]
+                sumvtype = GurobiRDDLCompiler._at_least_int(sumvtype)
+                for (varg, vtype, lb, ub, symb) in results[1:]:
+                    sumexpr = sumexpr + varg
+                    sumvtype = GurobiRDDLCompiler._promote_vtype(sumvtype, vtype)
+                    sumlb, sumub = GurobiRDDLCompiler._fix_bounds(sumlb + lb, sumub + ub)
+                    sumsymb = sumsymb or symb
                 
-                    # assign sum to a new variable
-                    if symb:
-                        res = self._add_var(model, vtype, lb, ub)
-                        model.addConstr(res == sumexpr)
-                        sumexpr = res
-                    else:
-                        res = lb = ub = sumexpr                   
-                return res, vtype, lb, ub, symb
+                # assign sum to a new variable
+                if sumsymb:
+                    key = f'{expr.id}at{step}add'
+                    res = self._add_var(model, sumvtype, sumlb, sumub, name=f'V{key}')
+                    model.addConstr(res == sumexpr, name=f'C{key}')
+                else:
+                    res = sumlb = sumub = sumexpr
+                return res, sumvtype, sumlb, sumub, sumsymb
             
             # unwrap multiplication to binary operations
             elif op == '*':
-                prodexpr, vtype, lb, ub, symb = results[0]
-                vtype = GurobiRDDLCompiler._at_least_int(vtype)
-                res = prodexpr
-                for (gterm2, vtype2, lb2, ub2, symb2) in results[1:]:
-                    prodexpr = prodexpr * gterm2
-                    vtype = GurobiRDDLCompiler._promote_vtype(vtype, vtype2)
-                    lb, ub = GurobiRDDLCompiler._fix_bounds_prod(lb, ub, lb2, ub2)
-                    symb = symb or symb2
-                    
-                    # assign product to a new variable
-                    if symb: 
-                        res = self._add_var(model, vtype, lb, ub)
-                        model.addConstr(res == prodexpr)
-                        prodexpr = res
-                    else:
-                        res = lb = ub = prodexpr                    
-                return res, vtype, lb, ub, symb
+                
+                # accumulate the non-symbolic terms
+                prodexpr = 1
+                prodvtype = GRB.INTEGER
+                for (varg, vtype, lb, ub, symb) in results:
+                    if not symb:
+                        prodexpr *= varg
+                        prodvtype = GurobiRDDLCompiler._promote_vtype(prodvtype, vtype)
+                
+                # accumulate the symbolic terms
+                prodlb = produb = prodexpr
+                prodsymb = False
+                for (i, (varg, vtype, lb, ub, symb)) in enumerate(results):
+                    if symb:
+                        prodexpr = prodexpr * varg
+                        prodvtype = GurobiRDDLCompiler._promote_vtype(prodvtype, vtype)
+                        prodlb, produb = GurobiRDDLCompiler._fix_bounds_prod(prodlb, produb, lb, ub)
+                        prodsymb = True
+                
+                        # assign product to a new variable
+                        key = f'{expr.id}at{step}mul{i}'
+                        prodvar = self._add_var(model, prodvtype, prodlb, produb, name=f'V{key}')
+                        model.addConstr(prodvar == prodexpr, name=f'C{key}')
+                        prodexpr = prodvar                   
+                return prodexpr, prodvtype, prodlb, produb, prodsymb
             
             # subtraction
             elif n == 2 and op == '-':
-                gterm1, vtype1, lb1, ub1, symb1 = results[0]
-                gterm2, vtype2, lb2, ub2, symb2 = results[1]
+                varg1, vtype1, lb1, ub1, symb1 = results[0]
+                varg2, vtype2, lb2, ub2, symb2 = results[1]
                 vtype = GurobiRDDLCompiler._promote_vtype(vtype1, vtype2)
                 vtype = GurobiRDDLCompiler._at_least_int(vtype)
-                diffexpr = gterm1 - gterm2
                 symb = symb1 or symb2
                 
                 # assign difference to a new variable
                 if symb:
+                    key = f'{expr.id}at{step}sub'
                     lb, ub = GurobiRDDLCompiler._fix_bounds(lb1 - ub2, ub1 - lb2)
-                    res = self._add_var(model, vtype, lb, ub)
-                    model.addConstr(res == diffexpr)
+                    res = self._add_var(model, vtype, lb, ub, name=f'V{key}')
+                    model.addConstr(res == varg1 - varg2, name=f'C{key}')
                 else:
-                    res = lb = ub = diffexpr                
+                    res = lb = ub = varg1 - varg2                
                 return res, vtype, lb, ub, symb
             
             # implement z = x / y as a constraint z * y = x
             elif n == 2 and op == '/': 
-                gterm1, _, lb1, ub1, symb1 = results[0]
-                gterm2, _, lb2, ub2, symb2 = results[1]
+                varg1, _, lb1, ub1, symb1 = results[0]
+                varg2, _, lb2, ub2, symb2 = results[1]
                 symb = symb1 or symb2
                 
                 if symb:
@@ -545,13 +551,13 @@ class GurobiRDDLCompiler:
                         else:
                             lb2, ub2 = 1 / ub2, 1 / lb2
                     else:
-                        lb2 = ub2 = 1 / gterm2
-                    lb, ub = GurobiRDDLCompiler._fix_bounds_prod(lb1, ub1, lb2, ub2)      
-                                  
-                    res = self._add_real_var(model, lb, ub)
-                    model.addConstr(res * gterm2 == gterm1)    
+                        lb2 = ub2 = 1 / varg2
+                    lb, ub = GurobiRDDLCompiler._fix_bounds_prod(lb1, ub1, lb2, ub2)    
+                    key = f'{expr.id}at{step}div'                  
+                    res = self._add_real_var(model, lb, ub, name=f'V{key}')
+                    model.addConstr(res * varg2 == varg1, name=f'C{key}')    
                 else:
-                    res = lb = ub = gterm1 / gterm2    
+                    res = lb = ub = varg1 / varg2    
                 return res, GRB.CONTINUOUS, lb, ub, symb
         
         raise RDDLNotImplementedError(
@@ -563,81 +569,96 @@ class GurobiRDDLCompiler:
     # boolean
     # ===========================================================================
     
-    def _gurobi_relational(self, expr, model, subs):
+    def _gurobi_relational(self, expr, model, subs, step):
         _, op = expr.etype
         args = expr.args        
         n = len(args)
         
         if n == 2:
             lhs, rhs = args
-            glhs, vtype1, lb1, ub1, symb1 = self._gurobi(lhs, model, subs)
-            grhs, vtype2, lb2, ub2, symb2 = self._gurobi(rhs, model, subs)
+            
+            # convert <= to >=, < to >, by swapping arguments
+            if op == '<=':
+                lhs, rhs = rhs, lhs
+                op = '>='
+            elif op == '<':
+                lhs, rhs = rhs, lhs
+                op = '>'
+            
+            varg1, vtype1, lb1, ub1, symb1 = self._gurobi(lhs, model, subs, step)
+            varg2, vtype2, lb2, ub2, symb2 = self._gurobi(rhs, model, subs, step)
             vtype = GurobiRDDLCompiler._promote_vtype(vtype1, vtype2)
             vtype = GurobiRDDLCompiler._at_least_int(vtype)
             symb = symb1 or symb2
-            
-            # convert <= to >=, < to >, etc.
-            if op == '<=' or op == '<':
-                glhs, grhs = grhs, glhs
-                op = '>=' if op == '<=' else '>'
-            diffexpr = glhs - grhs
-            
+                        
             # assign comparison operator to binary variable
-            if op == '==': 
+            if op == '==' or op == '~=': 
                 if symb:
-                    diff_var = self._add_var(model, vtype, lb1 - ub2, ub1 - lb2)
-                    model.addConstr(diff_var == diffexpr)
+                    key = f'{expr.id}at{step}tmp'
+                    lb, ub = GurobiRDDLCompiler._fix_bounds(lb1 - ub2, ub1 - lb2)
+                    vdiff = self._add_var(model, vtype, lb, ub, name=f'V{key}1')
+                    model.addConstr(vdiff == varg1 - varg2, name=f'C{key}1')   
+                                     
+                    lb, ub = GurobiRDDLCompiler._fix_bounds_abs(lb, ub)
+                    vabsdiff = self._add_var( model, vtype, lb, ub, name=f'V{key}2')
+                    model.addGenConstrAbs(vabsdiff, vdiff, name=f'C{key}2')
                     
-                    lb, ub = GurobiRDDLCompiler._fix_bounds_abs(lb1 - ub2, ub1 - lb2)
-                    abs_diff = self._add_var(model, vtype, lb, ub)
-                    model.addGenConstrAbs(abs_diff, diff_var)
-                                 
-                    res = self._add_bool_var(model)
-                    model.addConstr((res == 1) >> (abs_diff <= 0))
-                    model.addConstr((res == 0) >> (abs_diff >= self.epsilon))
+                    if op == '==':
+                        key = f'{expr.id}at{step}eq'
+                        res = self._add_bool_var(model, name=f'V{key}')
+                        model.addConstr((res == 1) >> (vabsdiff <= 0), name=f'C{key}1')
+                        model.addConstr((res == 0) >> (vabsdiff >= self.epsilon), name=f'C{key}0')
+                    else:
+                        key = f'{expr.id}at{step}neq'
+                        res = self._add_bool_var(model, name=f'V{key}')
+                        model.addConstr((res == 1) >> (vabsdiff >= self.epsilon), name=f'C{key}1')
+                        model.addConstr((res == 0) >> (vabsdiff <= 0), name=f'C{key}0')
                     lb, ub = 0, 1
                 else:
-                    res = bool(glhs == grhs)
+                    if op == '==':
+                        res = bool(varg1 == varg2)
+                    else:
+                        res = bool(varg1 != varg2)
                     lb = ub = int(res)
                 return res, GRB.BINARY, lb, ub, symb
             
             elif op == '>=':
                 if symb:
-                    res = self._add_bool_var(model)
-                    model.addConstr((res == 1) >> (diffexpr >= 0))
-                    model.addConstr((res == 0) >> (diffexpr <= -self.epsilon))
                     lb, ub = 0, 1
+                    if lb1 >= ub2:
+                        lb = 1
+                    if ub1 <= lb2:
+                        ub = 0
+                    if lb == ub:
+                        res = bool(lb)
+                        symb = False
+                    else:               
+                        key = f'{expr.id}at{step}geq'
+                        res = self._add_bool_var(model, name=f'V{key}')                    
+                        model.addConstr((res == 1) >> (varg1 - varg2 >= 0), name=f'C{key}1')
+                        model.addConstr((res == 0) >> (varg1 - varg2 <= -self.epsilon), name=f'C{key}0')
                 else:
-                    res = bool(glhs >= grhs)
-                    lb = ub = int(res)
-                return res, GRB.BINARY, lb, ub, symb
-            
-            elif op == '~=':
-                if symb:
-                    diff_var = self._add_var(model, vtype, lb1 - ub2, ub1 - lb2)
-                    model.addConstr(diff_var == diffexpr)
-                    
-                    lb, ub = GurobiRDDLCompiler._fix_bounds_abs(lb1 - ub2, ub1 - lb2)
-                    abs_diff = self._add_var(model, vtype, lb, ub)
-                    model.addGenConstrAbs(abs_diff, diff_var)
-                    
-                    res = self._add_bool_var(model)
-                    model.addConstr((res == 1) >> (abs_diff >= self.epsilon))
-                    model.addConstr((res == 0) >> (abs_diff <= 0))
-                    lb, ub = 0, 1
-                else: 
-                    res = bool(glhs != grhs)
+                    res = bool(varg1 >= varg2)
                     lb = ub = int(res)
                 return res, GRB.BINARY, lb, ub, symb
             
             elif op == '>':
                 if symb:
-                    res = self._add_bool_var(model)
-                    model.addConstr((res == 1) >> (diffexpr >= self.epsilon))
-                    model.addConstr((res == 0) >> (diffexpr <= 0))
                     lb, ub = 0, 1
+                    if lb1 > ub2:
+                        lb = 1
+                    if ub1 < lb2:
+                        ub = 0
+                    if lb == ub:
+                        res = bool(lb)
+                        symb = False
+                    else:
+                        key = f'{expr.id}at{step}gre'
+                        res = self._add_bool_var(model, name=f'V{key}')
+                        model.addConstr((res == 1) >> (varg1 - varg2 >= self.epsilon), name=f'C{key}1')
+                        model.addConstr((res == 0) >> (varg1 - varg2 <= 0), name=f'C{key}0')                    
                 else:
-                    res = bool(glhs > grhs)
+                    res = bool(varg1 > varg2)
                     lb = ub = int(res)
                 return res, GRB.BINARY, lb, ub, symb
             
@@ -646,7 +667,7 @@ class GurobiRDDLCompiler:
             f'supported in Gurobi compiler.\n' + 
             print_stack_trace(expr))
     
-    def _gurobi_logical(self, expr, model, subs):
+    def _gurobi_logical(self, expr, model, subs, step):
         _, op = expr.etype
         if op == '&':
             op = '^'
@@ -656,76 +677,81 @@ class GurobiRDDLCompiler:
         # unary negation ~z of z is a variable y such that y + z = 1
         if n == 1 and op == '~':
             arg, = args
-            gterm, *_, symb = self._gurobi(arg, model, subs)
+            varg, _, lb, ub, symb = self._gurobi(arg, model, subs, step)
             if symb:
-                res = self._add_bool_var(model)
-                model.addConstr(res + gterm == 1)
-                lb, ub = 0, 1
+                key = f'{expr.id}at{step}not'
+                res = self._add_bool_var(model, name=f'V{key}')
+                model.addConstr(res + varg == 1, name=f'C{key}')
+                lb, ub = GurobiRDDLCompiler._fix_bounds(1 - ub, 1 - lb)
             else:
-                if not isinstance(gterm, (bool, np.bool_)):
+                if not isinstance(varg, (bool, np.bool_)):
                     raise RDDLTypeError(
                         f'Constant expression is of type '
-                        f'{type(gterm)}, expected bool or np.bool_' + 
+                        f'{type(varg)}, expected bool or np.bool_' + 
                         '\n' + print_stack_trace(arg))
-                res = not bool(gterm)
+                res = not bool(varg)
                 lb = ub = int(res)            
             return res, GRB.BINARY, lb, ub, symb
             
         # binary operations
         elif n >= 1:
-            results = [self._gurobi(arg, model, subs) for arg in args]
-            gterms = [result[0] for result in results]
+            results = [self._gurobi(arg, model, subs, step) for arg in args]
+            vargs = [result[0] for result in results]
             symbs = [result[-1] for result in results]
             symb = any(symbs)
             
             # any non-variables must be converted to variables
             if symb:
-                for (i, gterm) in enumerate(gterms):
+                for (i, varg) in enumerate(vargs):
                     if not symbs[i]:
-                        if not isinstance(gterm, (bool, np.bool_)):
+                        if not isinstance(varg, (bool, np.bool_)):
                             raise RDDLTypeError(
                                 f'Constant expression is of type '
-                                f'{type(gterm)}, expected bool or np.bool_' + 
+                                f'{type(varg)}, expected bool or np.bool_' + 
                                 '\n' + print_stack_trace(args[i]))
-                        var = self._add_bool_var(model)
-                        model.addConstr(var == bool(gterm))
-                        gterms[i] = var
+                        key = f'{expr.id}at{step}tmp{i}'
+                        var = self._add_bool_var(model, name=f'V{key}')
+                        model.addConstr(var == bool(varg), name=f'C{key}')
+                        vargs[i] = var
                         symbs[i] = True
             
             # unwrap AND to binary operations
             if op == '^':
                 if symb:
-                    res = self._add_bool_var(model)
-                    model.addGenConstrAnd(res, gterms)
+                    key = f'{expr.id}at{step}and'
+                    res = self._add_bool_var(model, name=f'V{key}')
+                    model.addGenConstrAnd(res, vargs, name=f'C{key}')
                     lb, ub = 0, 1
                 else:
-                    res = all(gterms)   
+                    res = all(vargs)   
                     lb = ub = int(res)                 
                 return res, GRB.BINARY, lb, ub, symb
             
             # unwrap OR to binary operations
             elif op == '|':
                 if symb:
-                    res = self._add_bool_var(model)
-                    model.addGenConstrOr(res, gterms)
+                    key = f'{expr.id}at{step}or'
+                    res = self._add_bool_var(model, name=f'V{key}')
+                    model.addGenConstrOr(res, vargs, name=f'C{key}')
                     lb, ub = 0, 1
                 else:
-                    res = any(gterms)    
+                    res = any(vargs)    
                     lb = ub = int(res)                
                 return res, GRB.BINARY, lb, ub, symb
             
             # unwrap => to binary operations
             elif op == '=>' and n == 2:
-                gterm1, gterm2 = gterms
+                varg1, varg2 = vargs
                 if symb:
-                    not1 = self._add_bool_var(model)
-                    model.addConstr(not1 + gterm1 == 1)
-                              
-                    res = self._add_bool_var(model)
-                    model.addGenConstrOr(res, [not1, gterm2])
+                    key = f'{expr.id}at{step}tmp'
+                    not1 = self._add_bool_var(model, name=f'V{key}')
+                    model.addConstr(not1 + varg1 == 1, name=f'C{key}')      
+                    key = f'{expr.id}at{step}imply'          
+                    res = self._add_bool_var(model, name=f'V{key}')
+                    model.addGenConstrOr(res, [not1, varg2], name=f'C{key}')
                     lb, ub = 0, 1             
                 else:
-                    res = (gterm1 <= gterm2)
+                    res = (varg1 <= varg2)
                     lb = ub = int(res)
                 return res, GRB.BINARY, lb, ub, symb                
                             
@@ -745,13 +771,13 @@ class GurobiRDDLCompiler:
         else:
             return math.log(x)
     
-    def _gurobi_positive(self, model, gterm, vtype, lb, ub):
+    def _gurobi_positive(self, model, varg, vtype, lb, ub, name=''):
         lb, ub = max(lb, 0), max(ub, 0)
-        res = self._add_var(model, vtype, lb, ub)
-        model.addGenConstrMax(res, [gterm], constant=0)
+        res = self._add_var(model, vtype, lb, ub, name=f'V{name}')
+        model.addGenConstrMax(res, [varg], constant=0, name=f'C{name}')
         return res, lb, ub
                     
-    def _gurobi_function(self, expr, model, subs):
+    def _gurobi_function(self, expr, model, subs, step):
         _, name = expr.etype
         args = expr.args
         n = len(args)
@@ -759,16 +785,17 @@ class GurobiRDDLCompiler:
         # unary functions
         if n == 1:
             arg, = args
-            gterm, vtype, lb, ub, symb = self._gurobi(arg, model, subs)
+            varg, vtype, lb, ub, symb = self._gurobi(arg, model, subs, step)
             vtype = GurobiRDDLCompiler._at_least_int(vtype)
             
             if name == 'abs': 
                 if symb:
+                    key = f'{expr.id}at{step}abs'
                     lb, ub = GurobiRDDLCompiler._fix_bounds_abs(lb, ub)                    
-                    res = self._add_var(model, vtype, lb, ub)
-                    model.addGenConstrAbs(res, gterm)                    
+                    res = self._add_var(model, vtype, lb, ub, name=f'V{key}')
+                    model.addGenConstrAbs(res, varg, name=f'C{key}')                    
                 else:
-                    res = lb = ub = abs(gterm)           
+                    res = lb = ub = abs(varg)           
                 return res, vtype, lb, ub, symb
             
             elif name == 'sgn':
@@ -780,19 +807,24 @@ class GurobiRDDLCompiler:
                         res = lb = ub = -1
                         symb = False
                     else:
-                        pos = self._add_bool_var(model)
-                        model.addConstr((pos == 1) >> (gterm >= self.epsilon))
-                        model.addConstr((pos == 0) >> (gterm <= 0))
-                        neg = self._add_bool_var(model)
-                        model.addConstr((neg == 1) >> (gterm <= -self.epsilon))
-                        model.addConstr((neg == 0) >> (gterm >= 0))
-                        res = self._add_int_var(model, lb=-1, ub=1)
-                        model.addConstr(res + neg == pos)
+                        key = f'{expr.id}at{step}tmp1'
+                        pos = self._add_bool_var(model, name=f'V{key}')
+                        model.addConstr((pos == 1) >> (varg >= self.epsilon), name=f'C{key}l')
+                        model.addConstr((pos == 0) >> (varg <= 0), name=f'C{key}u')
+                        
+                        key = f'{expr.id}at{step}tmp2'
+                        neg = self._add_bool_var(model, name=f'V{key}')
+                        model.addConstr((neg == 1) >> (varg <= -self.epsilon), name=f'C{key}u')
+                        model.addConstr((neg == 0) >> (varg >= 0), name=f'C{key}l')
+                        
+                        key = f'{expr.id}at{step}sgn'
                         lb, ub = -1, 1
+                        res = self._add_int_var(model, lb=lb, ub=ub, name=f'V{key}')
+                        model.addConstr(res + neg == pos, name=f'C{key}')
                 else:
-                    if gterm > 0:
+                    if varg > 0:
                         res = lb = ub = 1
-                    elif gterm < 0:
+                    elif varg < 0:
                         res = lb = ub = -1
                     else:
                         res = lb = ub = 0
@@ -800,119 +832,126 @@ class GurobiRDDLCompiler:
                 
             elif name == 'floor':
                 if symb:
-                    lb, ub = GurobiRDDLCompiler._fix_bounds(
-                        math.floor(lb), math.floor(ub))
-                    res = self._add_int_var(model, lb, ub)
-                    model.addConstr(res <= gterm)
-                    model.addConstr(res + 1 >= gterm + self.epsilon)                    
+                    key = f'{expr.id}at{step}floor'
+                    lb, ub = GurobiRDDLCompiler._fix_bounds(math.floor(lb), math.floor(ub))
+                    res = self._add_int_var(model, lb, ub, name=f'V{key}')
+                    model.addConstr(res <= varg, name=f'C{key}u')
+                    model.addConstr(res + 1 >= varg + self.epsilon, name=f'C{key}l')                    
                 else:
-                    res = lb = ub = int(math.floor(gterm))
+                    res = lb = ub = int(math.floor(varg))
                 return res, GRB.INTEGER, lb, ub, symb
             
             elif name == 'ceil':
                 if symb:
-                    lb, ub = GurobiRDDLCompiler._fix_bounds(
-                        math.ceil(lb), math.ceil(ub))
-                    res = self._add_int_var(model, lb, ub)
-                    model.addConstr(res >= gterm)
-                    model.addConstr(res - 1 <= gterm - self.epsilon)
+                    key = f'{expr.id}at{step}ceil'
+                    lb, ub = GurobiRDDLCompiler._fix_bounds(math.ceil(lb), math.ceil(ub))
+                    res = self._add_int_var(model, lb, ub, name=f'V{key}')
+                    model.addConstr(res >= varg, name=f'C{key}l')
+                    model.addConstr(res - 1 <= varg - self.epsilon, name=f'C{key}u')
                 else:
-                    res = lb = ub = int(math.ceil(gterm))
+                    res = lb = ub = int(math.ceil(varg))
                 return res, GRB.INTEGER, lb, ub, symb
                 
             elif name == 'cos':
                 if symb:
+                    key = f'{expr.id}at{step}cos'
                     lb, ub = -1.0, 1.0
-                    res = self._add_real_var(model, lb, ub)
-                    model.addGenConstrCos(gterm, res, options=self.pw_options)
+                    res = self._add_real_var(model, lb, ub, name=f'V{key}')
+                    model.addGenConstrCos(varg, res, options=self.pw_options, name=f'C{key}')
                 else:
-                    res = lb = ub = math.cos(gterm)      
+                    res = lb = ub = math.cos(varg)      
                 return res, GRB.CONTINUOUS, lb, ub, symb
             
             elif name == 'sin':
                 if symb:
+                    key = f'{expr.id}at{step}sin'
                     lb, ub = -1.0, 1.0
-                    res = self._add_real_var(model, lb, ub)
-                    model.addGenConstrSin(gterm, res, options=self.pw_options)
+                    res = self._add_real_var(model, lb, ub, name=f'V{key}')
+                    model.addGenConstrSin(varg, res, options=self.pw_options, name=f'C{key}')
                 else:
-                    res = lb = ub = math.sin(gterm)      
+                    res = lb = ub = math.sin(varg)      
                 return res, GRB.CONTINUOUS, lb, ub, symb
             
             elif name == 'tan':
                 if symb:
+                    key = f'{expr.id}at{step}tan'
                     lb, ub = -GRB.INFINITY, GRB.INFINITY
-                    res = self._add_real_var(model, lb, ub)
-                    model.addGenConstrTan(gterm, res, options=self.pw_options)
+                    res = self._add_real_var(model, lb, ub, name=f'V{key}')
+                    model.addGenConstrTan(varg, res, options=self.pw_options, name=f'C{key}')
                 else:
-                    res = lb = ub = math.tan(gterm)      
+                    res = lb = ub = math.tan(varg)      
                 return res, GRB.CONTINUOUS, lb, ub, symb
             
             elif name == 'exp':
                 if symb: 
-                    lb, ub = GurobiRDDLCompiler._fix_bounds(
-                        math.exp(lb), math.exp(ub))
-                    res = self._add_real_var(model, lb, ub)
-                    model.addGenConstrExp(gterm, res, options=self.pw_options)
+                    key = f'{expr.id}at{step}exp'
+                    lb, ub = GurobiRDDLCompiler._fix_bounds(math.exp(lb), math.exp(ub))
+                    res = self._add_real_var(model, lb, ub, name=f'V{key}')
+                    model.addGenConstrExp(varg, res, options=self.pw_options, name=f'C{key}')
                 else:
-                    res = lb = ub = math.exp(gterm)      
+                    res = lb = ub = math.exp(varg)      
                 return res, GRB.CONTINUOUS, lb, ub, symb
             
             elif name == 'ln': 
                 if symb:
-                    arg, lb, ub = self._gurobi_positive(model, gterm, vtype, lb, ub)                    
+                    key = f'{expr.id}at{step}ln'
+                    arg, lb, ub = self._gurobi_positive(
+                        model, varg, vtype, lb, ub, name=f'{expr.id}at{step}tmp')                    
                     lb, ub = GurobiRDDLCompiler._fix_bounds(
                         GurobiRDDLCompiler._log(lb), GurobiRDDLCompiler._log(ub))
-                    res = self._add_real_var(model, lb, ub)
-                    model.addGenConstrLog(arg, res, options=self.pw_options)
+                    res = self._add_real_var(model, lb, ub, name=f'V{key}')
+                    model.addGenConstrLog(arg, res, options=self.pw_options, name=f'C{key}')
                 else:
-                    res = lb = ub = math.log(gterm)      
+                    res = lb = ub = math.log(varg)      
                 return res, GRB.CONTINUOUS, lb, ub, symb
             
             elif name == 'sqrt':
                 if symb: 
-                    arg, lb, ub = self._gurobi_positive(model, gterm, vtype, lb, ub)                    
+                    key = f'{expr.id}at{step}sqrt'
+                    arg, lb, ub = self._gurobi_positive(
+                        model, varg, vtype, lb, ub, name=f'{expr.id}at{step}tmp')                    
                     lb, ub = GurobiRDDLCompiler._fix_bounds(
                         math.sqrt(lb), math.sqrt(ub))
-                    res = self._add_real_var(model, lb, ub)
-                    model.addGenConstrPow(arg, res, 0.5, options=self.pw_options)
+                    res = self._add_real_var(model, lb, ub, name=f'V{key}')
+                    model.addGenConstrPow(arg, res, 0.5, options=self.pw_options, name=f'C{key}')
                 else:
-                    res = lb = ub = math.sqrt(gterm)     
+                    res = lb = ub = math.sqrt(varg)     
                 return res, GRB.CONTINUOUS, lb, ub, symb
         
         # binary functions
         elif n == 2:
             arg1, arg2 = args
-            gterm1, vtype1, lb1, ub1, symb1 = self._gurobi(arg1, model, subs)
-            gterm2, vtype2, lb2, ub2, symb2 = self._gurobi(arg2, model, subs)
+            varg1, vtype1, lb1, ub1, symb1 = self._gurobi(arg1, model, subs, step)
+            varg2, vtype2, lb2, ub2, symb2 = self._gurobi(arg2, model, subs, step)
             vtype = GurobiRDDLCompiler._promote_vtype(vtype1, vtype2)
             vtype = GurobiRDDLCompiler._at_least_int(vtype)
             symb = symb1 or symb2
             
             if name == 'min': 
                 if symb: 
-                    lb, ub = GurobiRDDLCompiler._fix_bounds(
-                        min(lb1, lb2), min(ub1, ub2))
-                    res = self._add_var(model, vtype, lb, ub)
-                    model.addGenConstrMin(res, [gterm1, gterm2])
+                    key = f'{expr.id}at{step}min'
+                    lb, ub = GurobiRDDLCompiler._fix_bounds(min(lb1, lb2), min(ub1, ub2))
+                    res = self._add_var(model, vtype, lb, ub, name=f'V{key}')
+                    model.addGenConstrMin(res, [varg1, varg2], name=f'C{key}')
                 else:
-                    res = lb = ub = min(gterm1, gterm2)  
+                    res = lb = ub = min(varg1, varg2)  
                 return res, vtype, lb, ub, symb
             
             elif name == 'max':
                 if symb:
-                    lb, ub = GurobiRDDLCompiler._fix_bounds(
-                        max(lb1, lb2), max(ub1, ub2))
-                    res = self._add_var(model, vtype, lb, ub)
-                    model.addGenConstrMax(res, [gterm1, gterm2])
+                    key = f'{expr.id}at{step}max'
+                    lb, ub = GurobiRDDLCompiler._fix_bounds(max(lb1, lb2), max(ub1, ub2))
+                    res = self._add_var(model, vtype, lb, ub, name=f'V{key}')
+                    model.addGenConstrMax(res, [varg1, varg2], name=f'C{key}')
                 else:
-                    res = lb = ub = max(gterm1, gterm2)  
+                    res = lb = ub = max(varg1, varg2)  
                 return res, vtype, lb, ub, symb
             
             elif name == 'pow':
                 if symb: 
                     # argument must be non-negative
                     base, lb1, ub1 = self._gurobi_positive(
-                        model, gterm1, vtype1, lb1, ub1)   
+                        model, varg1, vtype1, lb1, ub1, name=f'{expr.id}at{step}tmp')   
                                         
                     # compute bounds on pow
                     loglb = GurobiRDDLCompiler._log(lb1)
@@ -922,41 +961,67 @@ class GurobiRDDLCompiler:
                         math.exp(min(loglu)), math.exp(max(loglu)))
                     
                     # assign pow to new variable
-                    res = self._add_real_var(model, lb, ub)
-                    model.addGenConstrPow(
-                        base, res, gterm2, options=self.pw_options)
+                    key = f'{expr.id}at{step}pow'
+                    res = self._add_real_var(model, lb, ub, name=f'V{key}')
+                    model.addGenConstrPow(base, res, varg2, options=self.pw_options, name=f'C{key}')
                 else:
-                    res = lb = ub = math.pow(gterm1, gterm2)         
+                    res = lb = ub = math.pow(varg1, varg2)         
                 return res, GRB.CONTINUOUS, lb, ub, symb
             
             elif name == 'mod':
                 if symb:
                     # second argument must be non-negative
-                    gterm2, lb2, ub2 = self._gurobi_positive(
-                        model, gterm2, vtype2, lb2, ub2)  
+                    varg2, lb2, ub2 = self._gurobi_positive(
+                        model, varg2, vtype2, lb2, ub2, name=f'{expr.id}at{step}tmp1')  
                     
                     # compute r = x % y as x = y * q + r where 0 <= r < y
+                    key = f'{expr.id}at{step}mod'
                     lb, ub = 0, max(0, ub2 - 1)
-                    res = self._add_int_var(model, lb, ub)
-                    quotient = self._add_int_var(model)
-                    model.addConstr(gterm1 == gterm2 * quotient + res)                    
+                    res = self._add_int_var(model, lb, ub, name=f'V{key}')
+                    quotient = self._add_int_var(model, name=f'V{expr.id}at{step}tmp2')
+                    model.addConstr(varg1 == varg2 * quotient + res, name=f'C{key}')                    
                 else:
-                    res = lb = ub = gterm1 % gterm2
+                    res = lb = ub = varg1 % varg2
                 return res, GRB.INTEGER, lb, ub, symb
             
             elif name == 'fmod':
                 if symb:
                     # second argument must be non-negative
-                    gterm2, lb2, ub2 = self._gurobi_positive(
-                        model, gterm2, vtype2, lb2, ub2)  
+                    varg2, lb2, ub2 = self._gurobi_positive(
+                        model, varg2, vtype2, lb2, ub2, name=f'{expr.id}at{step}tmp1')  
                     
                     # compute r = x % y as x = y * q + r where 0 <= r < y
+                    key = f'{expr.id}at{step}fmod'
                     lb, ub = 0, max(0, ub2 - self.epsilon)
-                    res = self._add_real_var(model, lb, ub)
-                    quotient = self._add_int_var(model)
-                    model.addConstr(gterm1 == gterm2 * quotient + res)                    
+                    res = self._add_real_var(model, lb, ub, name=f'V{key}')
+                    quotient = self._add_int_var(model, name=f'V{expr.id}at{step}tmp2')
+                    model.addConstr(varg1 == varg2 * quotient + res, name=f'C{key}')                    
                 else:
-                    res = lb = ub = gterm1 % gterm2
+                    res = lb = ub = varg1 % varg2
+                return res, GRB.CONTINUOUS, lb, ub, symb
+            
+            elif name == 'hypot':
+                if symb:
+                    if lb1 >= 0 or ub1 <= 0:
+                        lb1, ub1 = min(lb1 ** 2, ub1 ** 2), max(lb1 ** 2, ub1 ** 2)
+                    else:
+                        lb1, ub1 = 0.0, max(lb1 ** 2, ub1 ** 2)
+                    if lb2 >= 0 or ub2 <= 0:
+                        lb2, ub2 = min(lb2 ** 2, ub2 ** 2), max(lb2 ** 2, ub2 ** 2)
+                    else:
+                        lb2, ub2 = 0.0, max(lb2 ** 2, ub2 ** 2)
+                    lb, ub = GurobiRDDLCompiler._fix_bounds(lb1 + lb2, ub1 + ub2)
+                    
+                    key = f'{expr.id}at{step}tmp'
+                    ssq = self._add_real_var(model, lb, ub, name=f'V{key}')
+                    model.addConstr(ssq == varg1 * varg1 + varg2 * varg2, name=f'C{key}')        
+                                
+                    key = f'{expr.id}at{step}hypot'
+                    lb, ub = GurobiRDDLCompiler._fix_bounds(math.sqrt(lb), math.sqrt(ub))
+                    res = self._add_real_var(model, lb, ub, name=f'V{key}')
+                    model.addGenConstrPow(ssq, res, 0.5, options=self.pw_options, name=f'C{key}')
+                else:
+                    res = lb = ub = math.sqrt(varg1 ** 2 + varg2 ** 2)
                 return res, GRB.CONTINUOUS, lb, ub, symb
                 
         raise RDDLNotImplementedError(
@@ -968,35 +1033,38 @@ class GurobiRDDLCompiler:
     # control flow
     # ===========================================================================
     
-    def _gurobi_control(self, expr, model, subs):
+    def _gurobi_control(self, expr, model, subs, step):
         _, op = expr.etype
         args = expr.args
         n = len(args)
         
         if n == 3 and op == 'if':
             pred, arg1, arg2 = args
-            gpred, *_, symbp = self._gurobi(pred, model, subs)
-            gterm1, vtype1, lb1, ub1, symb1 = self._gurobi(arg1, model, subs)
-            gterm2, vtype2, lb2, ub2, symb2 = self._gurobi(arg2, model, subs)
+            vargp, *_, symbp = self._gurobi(pred, model, subs, step)
+            varg1, vtype1, lb1, ub1, symb1 = self._gurobi(arg1, model, subs, step)
+            varg2, vtype2, lb2, ub2, symb2 = self._gurobi(arg2, model, subs, step)
             vtype = GurobiRDDLCompiler._promote_vtype(vtype1, vtype2)
             
-            # assign if to new variable
+            # predicate is symbolic: use an indicator variable
             if symbp:
+                key = f'{expr.id}at{step}if'
                 lb, ub = GurobiRDDLCompiler._fix_bounds(min(lb1, lb2), max(ub1, ub2))
-                res = self._add_var(model, vtype, lb, ub)
-                model.addConstr((gpred == 1) >> (res == gterm1))
-                model.addConstr((gpred == 0) >> (res == gterm2))
+                res = self._add_var(model, vtype, lb, ub, name=f'V{key}')
+                model.addConstr((vargp == 1) >> (res == varg1), name=f'C{key}1')
+                model.addConstr((vargp == 0) >> (res == varg2), name=f'C{key}0')
                 symb = True
+            
+            # predicate is not symbolic: eliminate dead branch
             else:
-                if not isinstance(gpred, (bool, np.bool_)):
+                if not isinstance(vargp, (bool, np.bool_)):
                     raise RDDLTypeError(
                         f'Constant expression is of type '
-                        f'{type(gpred)}, expected bool or np.bool_' + 
+                        f'{type(vargp)}, expected bool or np.bool_' + 
                         '\n' + print_stack_trace(pred))
-                if bool(gpred):
-                    res, lb, ub, symb = gterm1, lb1, ub1, symb1
+                if bool(vargp):
+                    res, lb, ub, symb = varg1, lb1, ub1, symb1
                 else:
-                    res, lb, ub, symb = gterm2, lb2, ub2, symb2
+                    res, lb, ub, symb = varg2, lb2, ub2, symb2
             return res, vtype, lb, ub, symb
             
         raise RDDLNotImplementedError(
@@ -1008,135 +1076,137 @@ class GurobiRDDLCompiler:
     # random variables
     # ===========================================================================
     
-    def _gurobi_random(self, expr, model, subs):
+    def _gurobi_random(self, expr, model, subs, step):
         _, name = expr.etype
         if name == 'KronDelta':
-            return self._gurobi_kron(expr, model, subs)
+            return self._gurobi_kron(expr, model, subs, step)
         elif name == 'DiracDelta':
-            return self._gurobi_dirac(expr, model, subs)
+            return self._gurobi_dirac(expr, model, subs, step)
         elif name == 'Uniform':
-            return self._gurobi_uniform(expr, model, subs)
+            return self._gurobi_uniform(expr, model, subs, step)
         elif name == 'Bernoulli':
-            return self._gurobi_bernoulli(expr, model, subs)
+            return self._gurobi_bernoulli(expr, model, subs, step)
         elif name == 'Normal':
-            return self._gurobi_normal(expr, model, subs)
+            return self._gurobi_normal(expr, model, subs, step)
         elif name == 'Poisson':
-            return self._gurobi_poisson(expr, model, subs)
+            return self._gurobi_poisson(expr, model, subs, step)
         elif name == 'Exponential':
-            return self._gurobi_exponential(expr, model, subs)
+            return self._gurobi_exponential(expr, model, subs, step)
         elif name == 'Gamma':
-            return self._gurobi_gamma(expr, model, subs)
+            return self._gurobi_gamma(expr, model, subs, step)
         elif name == 'Weibull':
-            return self._gurobi_weibull(expr, model, subs)
+            return self._gurobi_weibull(expr, model, subs, step)
         else:
             raise RDDLNotImplementedError(
                 f'Distribution {name} is not supported in Gurobi compiler.\n' + 
                 print_stack_trace(expr))
     
-    def _gurobi_kron(self, expr, model, subs): 
+    def _gurobi_kron(self, expr, model, subs, step): 
         arg, = expr.args
-        return self._gurobi(arg, model, subs)
+        return self._gurobi(arg, model, subs, step)
     
-    def _gurobi_dirac(self, expr, model, subs):
+    def _gurobi_dirac(self, expr, model, subs, step):
         arg, = expr.args
-        return self._gurobi(arg, model, subs)
+        return self._gurobi(arg, model, subs, step)
     
-    def _gurobi_uniform(self, expr, model, subs):
+    def _gurobi_uniform(self, expr, model, subs, step):
         if self.verbose >= 2:
             raise_warning('Using the replacement rule: '
                           'Uniform(a, b) --> (a + b) / 2.')
             
         arg1, arg2 = expr.args
-        gterm1, _, lb1, ub1, symb1 = self._gurobi(arg1, model, subs)
-        gterm2, _, lb2, ub2, symb2 = self._gurobi(arg2, model, subs)
+        varg1, _, lb1, ub1, symb1 = self._gurobi(arg1, model, subs, step)
+        varg2, _, lb2, ub2, symb2 = self._gurobi(arg2, model, subs, step)
         
         # determinize uniform as (lower + upper) / 2        
         symb = symb1 or symb2
-        midexpr = (gterm1 + gterm2) / 2
+        midexpr = (varg1 + varg2) / 2
         if symb:
             lb, ub = GurobiRDDLCompiler._fix_bounds(
                 (lb1 + lb2) / 2, (ub1 + ub2) / 2)
-            res = self._add_real_var(model, lb, ub)
-            model.addConstr(res == midexpr)            
+            key = f'{expr.id}at{step}unif'
+            res = self._add_real_var(model, lb, ub, name=f'V{key}')
+            model.addConstr(res == midexpr, name=f'C{key}')            
         else:
             res = lb = ub = midexpr
         return res, GRB.CONTINUOUS, lb, ub, symb
         
-    def _gurobi_bernoulli(self, expr, model, subs):
+    def _gurobi_bernoulli(self, expr, model, subs, step):
         if self.verbose >= 2:
             raise_warning('Using the replacement rule: Bernoulli(p) --> p')
             
         arg, = expr.args
-        gterm, _, lb, ub, symb = self._gurobi(arg, model, subs)
+        varg, _, lb, ub, symb = self._gurobi(arg, model, subs, step)
         
         # determinize bernoulli as indicator of p > 0.5
         if symb:
-            res = self._add_bool_var(model)
-            model.addConstr((res == 1) >> (gterm >= 0.5 + self.epsilon))
-            model.addConstr((res == 0) >> (gterm <= 0.5))
+            key = f'{expr.id}at{step}bern'
+            res = self._add_bool_var(model, name=f'V{key}')
+            model.addConstr((res == 1) >> (varg >= 0.5 + self.epsilon), name=f'C{key}1')
+            model.addConstr((res == 0) >> (varg <= 0.5), name=f'C{key}0')
             lb, ub = 0, 1
         else:
-            res = bool(gterm > 0.5)
+            res = bool(varg > 0.5)
             lb = ub = int(res)
         return res, GRB.BINARY, lb, ub, symb
         
-    def _gurobi_normal(self, expr, model, subs):
+    def _gurobi_normal(self, expr, model, subs, step):
         if self.verbose >= 2:
             raise_warning('Using the replacement rule: Normal(m, v) --> m')
             
         mean, _ = expr.args
-        gterm, _, lb, ub, symb = self._gurobi(mean, model, subs)
+        varg, _, lb, ub, symb = self._gurobi(mean, model, subs, step)
         
         # determinize Normal as mean
-        return gterm, GRB.CONTINUOUS, lb, ub, symb
+        return varg, GRB.CONTINUOUS, lb, ub, symb
     
-    def _gurobi_poisson(self, expr, model, subs):
+    def _gurobi_poisson(self, expr, model, subs, step):
         if self.verbose >= 2:
             raise_warning('Using the replacement rule: Poisson(l) --> l')
             
         rate, = expr.args
-        gterm, _, lb, ub, symb = self._gurobi(rate, model, subs)
+        varg, _, lb, ub, symb = self._gurobi(rate, model, subs, step)
         
         # determinize Poisson as rate
-        return gterm, GRB.CONTINUOUS, lb, ub, symb
+        return varg, GRB.CONTINUOUS, lb, ub, symb
     
-    def _gurobi_exponential(self, expr, model, subs):
+    def _gurobi_exponential(self, expr, model, subs, step):
         if self.verbose >= 2:
             raise_warning('Using the replacement rule: Exponential(l) --> l')
             
         scale, = expr.args
-        gterm, _, lb, ub, symb = self._gurobi(scale, model, subs)
+        varg, _, lb, ub, symb = self._gurobi(scale, model, subs, step)
         
         # determinize Exponential as scale
-        return gterm, GRB.CONTINUOUS, lb, ub, symb
+        return varg, GRB.CONTINUOUS, lb, ub, symb
 
-    def _gurobi_gamma(self, expr, model, subs):
+    def _gurobi_gamma(self, expr, model, subs, step):
         if self.verbose >= 2:
             raise_warning('Using the replacement rule: Gamma(r, s) --> r * s')
             
         shape, scale = expr.args
-        gterm1, _, lb1, ub1, symb1 = self._gurobi(shape, model, subs)
-        gterm2, _, lb2, ub2, symb2 = self._gurobi(scale, model, subs)
+        varg1, _, lb1, ub1, symb1 = self._gurobi(shape, model, subs, step)
+        varg2, _, lb2, ub2, symb2 = self._gurobi(scale, model, subs, step)
         
         # determinize gamma as shape * scale
-        prodexpr = gterm1 * gterm2
         symb = symb1 or symb2
         if symb:
+            key = f'{expr.id}at{step}gamma'
             lb, ub = GurobiRDDLCompiler._fix_bounds_prod(lb1, ub1, lb2, ub2)
-            res = self._add_real_var(model, lb, ub)
-            model.addConstr(res == prodexpr)
+            res = self._add_real_var(model, lb, ub, name=f'V{key}')
+            model.addConstr(res == varg1 * varg2, name=f'C{key}')
         else:
-            res = lb = ub = prodexpr     
+            res = lb = ub = varg1 * varg2     
         return res, GRB.CONTINUOUS, lb, ub, symb
     
-    def _gurobi_weibull(self, expr, model, subs):
+    def _gurobi_weibull(self, expr, model, subs, step):
         if self.verbose >= 2:
             raise_warning('Using the replacement rule: '
                           'Weibull(s, l) --> l * Gamma(1 + 1/s)')
         
         shape, scale = expr.args
-        gterm1, _, _, _, symb1 = self._gurobi(shape, model, subs)
-        gterm2, _, lb2, ub2, symb2 = self._gurobi(scale, model, subs)
+        varg1, _, _, _, symb1 = self._gurobi(shape, model, subs, step)
+        varg2, _, lb2, ub2, symb2 = self._gurobi(scale, model, subs, step)
         
         # check shape is non symbolic
         if symb1:
@@ -1146,15 +1216,15 @@ class GurobiRDDLCompiler:
                 print_stack_trace(expr))
         
         # estimate mean as scale * Gamma(1 + 1/shape)
-        gampart = np.exp(lngamma(1. + 1. / gterm1))
+        gampart = np.exp(lngamma(1. + 1. / varg1))
         gampart = max(min(gampart, GRB.INFINITY), -GRB.INFINITY)
-        prodexpr = gterm2 * gampart
         symb = symb1 or symb2
         if symb:
+            key = f'{expr.id}at{step}weib'
             lb, ub = GurobiRDDLCompiler._fix_bounds_prod(lb2, ub2, gampart, gampart)
-            res = self._add_real_var(model, lb, ub)
-            model.addConstr(res == prodexpr)
+            res = self._add_real_var(model, lb, ub, name=f'V{key}')
+            model.addConstr(res == varg2 * gampart, name=f'C{key}')
         else:
-            res = lb = ub = prodexpr
+            res = lb = ub = varg2 * gampart
         return res, GRB.CONTINUOUS, lb, ub, symb
         
