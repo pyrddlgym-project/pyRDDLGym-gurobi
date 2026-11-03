@@ -1,0 +1,44 @@
+[build-system]
+requires = ["setuptools>=77"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "pyRDDLGym-gurobi"
+version = "0.2"
+description = "pyRDDLGym-gurobi: Gurobi compilation of RDDL description files, and optimization tools."
+readme = "README.md"
+license = "MIT"
+license-files = ["LICENSE"]
+requires-python = ">=3.9"
+authors = [
+    {name = "Michael Gimelfarb", email = "mgimelfarb@yahoo.ca"},
+    {name = "Ayal Taitler", email = "ataitler@gmail.com"},
+    {name = "Scott Sanner", email = "ssanner@mie.utoronto.ca"},
+]
+dependencies = [
+    "pyRDDLGym>=2.0",
+    "gurobipy>=10.0.0",
+]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Intended Audience :: Science/Research",
+    "Natural Language :: English",
+    "Operating System :: OS Independent",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.9",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Programming Language :: Python :: 3.14",
+    "Topic :: Scientific/Engineering :: Artificial Intelligence",
+]
+
+[project.urls]
+Homepage = "https://github.com/pyrddlgym-project/pyRDDLGym-gurobi"
+
+[tool.setuptools.packages.find]
+include = ["pyRDDLGym_gurobi*"]
+
+[tool.setuptools.package-data]
+"*" = ["*.cfg"]
