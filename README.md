@@ -1,14 +1,27 @@
+<div align="center">
+
 # pyRDDLGym-gurobi
 
-![Python Version](https://img.shields.io/badge/python-3.8%2B-blue)
+![Python Version](https://img.shields.io/badge/python-3.9%2B-blue)
 [![PyPI Version](https://img.shields.io/pypi/v/pyRDDLGym-gurobi.svg)](https://pypi.org/project/pyRDDLGym-gurobi/)
 [![Documentation Status](https://readthedocs.org/projects/pyrddlgym/badge/?version=latest)](https://pyrddlgym.readthedocs.io/en/latest/gurobi.html)
 ![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)
 [![Cumulative PyPI Downloads](https://img.shields.io/pypi/dm/pyrddlgym-gurobi)](https://pypistats.org/packages/pyrddlgym-gurobi)
 
-[Installation](#installation) | [Basic Example](#running-the-basic-example) | [Running Python](#running-from-the-python-api) | [Configuration](#configuring-pyrddlgym-gurobi) | [Citing](#citing-pyrddlgym-gurobi)
+**GurobiPlan compiles RDDL problems into mixed-integer programs and plans by solving them with Gurobi.**
 
-Supports compilation of RDDL description files into Gurobi mixed-integer (non-linear) programs, and automated planning tools for optimizing these programs in MDPs.
+[Why GurobiPlan?](#why-gurobiplan) &nbsp;&middot;&nbsp; [Installation](#installation) &nbsp;&middot;&nbsp; [Example](#running-the-basic-example) &nbsp;&middot;&nbsp; [Python API](#running-from-the-python-api) &nbsp;&middot;&nbsp; [Configuration](#configuring-pyrddlgym-gurobi) &nbsp;&middot;&nbsp; [Citing](#citing-pyrddlgym-gurobi)
+
+</div>
+
+## Why GurobiPlan?
+
+- 🧮 **No hand-written models.** Every RDDL description compiles automatically into a Gurobi optimization problem: boolean fluents become binary variables, integer fluents integer variables and real fluents continuous ones.
+- 📐 **Nonlinear, too.** Exponentials, logarithms, trigonometric functions, powers, min, max and absolute values compile to Gurobi general constraints, with piecewise-linear approximations where needed.
+- 🛡️ **Constraints respected.** Action preconditions and state invariants become hard constraints of the program, not penalties to tune.
+- 🧭 **Plans or policies.** Optimize straight-line plans, or piecewise-linear and quadratic policies of the state.
+- 🔁 **Replan as you go.** Re-solve from the current state at every step over a rolling horizon, or optimize once, offline.
+- ⚙️ **Configure in one file.** Planner settings and any Gurobi parameter (time limits, non-convexity, output) live in one config file, in the same format as [JaxPlan](https://github.com/pyrddlgym-project/pyRDDLGym-jax).
 
 > [!NOTE]  
 > The Gurobi planners currently determinize all stochastic variables, making it less suitable for highly stochastic problems or problems with (stochastic) dead ends.
