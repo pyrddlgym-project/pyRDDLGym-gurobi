@@ -2,11 +2,11 @@
 
 # pyRDDLGym-gurobi
 
+[![Paper](https://img.shields.io/badge/Paper-ICAPS%202024-b31b1b)](https://ojs.aaai.org/index.php/ICAPS/article/view/31480)
 ![Python Version](https://img.shields.io/badge/python-3.9%2B-blue)
 [![PyPI Version](https://img.shields.io/pypi/v/pyRDDLGym-gurobi.svg)](https://pypi.org/project/pyRDDLGym-gurobi/)
 [![Documentation Status](https://readthedocs.org/projects/pyrddlgym/badge/?version=latest)](https://pyrddlgym.readthedocs.io/en/latest/gurobi.html)
 ![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)
-[![Cumulative PyPI Downloads](https://img.shields.io/pypi/dm/pyrddlgym-gurobi)](https://pypistats.org/packages/pyrddlgym-gurobi)
 
 **GurobiPlan compiles RDDL problems into mixed-integer programs and plans by solving them with Gurobi.**
 
