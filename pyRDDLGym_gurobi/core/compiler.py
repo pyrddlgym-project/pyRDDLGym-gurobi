@@ -101,6 +101,15 @@ class GurobiRDDLCompiler:
         # trace expressions to cache information to be used later
         tracer = RDDLObjectsTracer(self.rddl, logger=self.logger)
         self.traced = tracer.trace()
+
+        # determinize init-state expressions as is done for random CPFs
+        subs = self._compile_init_subs()
+        for (name, expr, *_) in self.traced.init_state_schedule:
+            prange = self.rddl.variable_ranges[name]
+            dtype = RDDLValueInitializer.NUMPY_TYPES.get(prange, RDDLValueInitializer.INT)
+            value, *_ = self._gurobi(expr, None, subs, 'init')
+            self.init_values[name] = dtype(value)
+            subs.update(self._compile_init_subs({name: self.init_values[name]}))
         
         # calculate no-op actions
         self.noop_actions = {}
