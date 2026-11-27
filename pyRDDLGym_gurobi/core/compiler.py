@@ -1,6 +1,7 @@
 from copy import deepcopy
 import math
 import numpy as np
+import sys
 from typing import Any, Dict, List, Optional, Tuple, TYPE_CHECKING
 
 import gurobipy
@@ -67,6 +68,8 @@ class GurobiRDDLCompiler:
             model_params = {'NonConvex': 2}
         self.plan = plan
         if rollout_horizon is None:
+            if rddl.horizon == sys.maxsize:
+                raise ValueError('rollout_horizon must be set when the horizon is infinite.')
             rollout_horizon = rddl.horizon
         self.horizon = rollout_horizon
         self.discount = rddl.discount
