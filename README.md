@@ -17,9 +17,10 @@
 ## Why GurobiPlan?
 
 - 🧮 **No hand-written models.** Every RDDL description compiles automatically into a Gurobi optimization problem: boolean fluents become binary variables, integer fluents integer variables and real fluents continuous ones.
-- 📐 **Nonlinear, too.** Exponentials, logarithms, trigonometric functions, powers, min, max and absolute values compile to Gurobi general constraints, with piecewise-linear approximations where needed.
-- 🛡️ **Constraints respected.** Action preconditions and state invariants become hard constraints of the program, not penalties to tune.
-- 🧭 **Plans or policies.** Optimize straight-line plans, or piecewise-linear and quadratic policies of the state.
+- 🧊 **No grounding.** Like [JaxPlan](https://github.com/pyrddlgym-project/pyRDDLGym-jax), the lifted domain compiles directly to tensors of Gurobi variables, so domains that cannot be grounded (e.g. with `switch` or nested pvariables) are supported.
+- 📐 **Nonlinear, too.** Exponentials, logarithms, trigonometric functions, powers, min, max, absolute values and matrix operations compile to exact Gurobi nonlinear and general constraints.
+- 🛡️ **Constraints respected.** Action preconditions and state invariants become hard constraints of the program, not penalties to tune, and termination conditions end the planned episode.
+- 🧭 **Plans or policies.** Optimize straight-line plans, or piecewise-linear policies of the state.
 - 🔁 **Replan as you go.** Re-solve from the current state at every step over a rolling horizon, or optimize once, offline.
 - ⚙️ **Configure in one file.** Planner settings and any Gurobi parameter (time limits, non-convexity, output) live in one config file, in the same format as [JaxPlan](https://github.com/pyrddlgym-project/pyRDDLGym-jax).
 
@@ -29,7 +30,7 @@
 
 ## Installation
 
-The basic requirements are ``pyRDDLGym>=2.0`` and ``gurobipy>=10.0.0``. 
+The basic requirements are ``pyRDDLGym>=2.0``, ``gurobipy>=12.0.0`` and ``scipy`` (for gurobipy's matrix API). 
 To run the basic example, you will also require ``rddlrepository>=2.0``. Everything except rddlrepository can be installed via pip:
 
 ```shell
