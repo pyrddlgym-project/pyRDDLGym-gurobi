@@ -30,8 +30,8 @@
 
 ## Installation
 
-The basic requirements are ``pyRDDLGym>=2.0``, ``gurobipy>=12.0.0`` and ``scipy`` (for gurobipy's matrix API). 
-To run the basic example, you will also require ``rddlrepository>=2.0``. Everything except rddlrepository can be installed via pip:
+The basic requirements are ``pyRDDLGym>=3.0``, ``gurobipy>=12.0.0`` and ``scipy`` (for gurobipy's matrix API). 
+To run the basic example, you will also require ``rddlrepository>=3.0``. Everything except rddlrepository can be installed via pip:
 
 ```shell
 pip install pyRDDLGym-gurobi

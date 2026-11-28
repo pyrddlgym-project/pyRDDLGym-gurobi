@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "pyRDDLGym-gurobi"
-version = "0.2"
+version = "1.0"
 description = "pyRDDLGym-gurobi: Gurobi compilation of RDDL description files, and optimization tools."
 readme = "README.md"
 license = "MIT"
@@ -16,13 +16,13 @@ authors = [
     {name = "Scott Sanner", email = "ssanner@mie.utoronto.ca"},
 ]
 dependencies = [
-    "pyRDDLGym>=2.0",
+    "pyRDDLGym>=3.0",
     "gurobipy>=12.0.0",
     "numpy",
     "scipy",
 ]
 classifiers = [
-    "Development Status :: 4 - Beta",
+    "Development Status :: 5 - Production/Stable",
     "Intended Audience :: Science/Research",
     "Natural Language :: English",
     "Operating System :: OS Independent",
