@@ -678,6 +678,9 @@ class GurobiOfflineController(BaseAgent):
         comparisons in Gurobi constraints
         :param model_params: dictionary of parameter name and values to
         pass to Gurobi model after compilation
+        :param sampling: 'mean' (determinized) or 'reparam' (sampled scenarios)
+        :param num_scenarios: number of sampled rollouts with sampling='reparam'
+        :param seed: seed of the noise samples with sampling='reparam'
         :param verbose: whether to print nothing (0) or a summary (1) on compile
         '''
         if rddl.observ_fluents and not isinstance(plan, GurobiStraightLinePlan):
@@ -741,6 +744,9 @@ class GurobiOnlineController(BaseAgent):
         comparisons in Gurobi constraints
         :param model_params: dictionary of parameter name and values to
         pass to Gurobi model after compilation
+        :param sampling: 'mean' (determinized) or 'reparam' (sampled scenarios)
+        :param num_scenarios: number of sampled rollouts with sampling='reparam'
+        :param seed: seed of the noise samples with sampling='reparam'
         :param verbose: whether to print nothing (0) or a summary (1) on compile
         '''
         if rddl.observ_fluents:

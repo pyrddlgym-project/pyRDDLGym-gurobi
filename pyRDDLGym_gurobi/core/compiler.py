@@ -78,11 +78,16 @@ class GurobiRDDLCompiler:
                  rollout_horizon: Optional[int]=None,
                  epsilon: float=1e-5,
                  model_params: Optional[Dict[str, Any]]=None,
+                 sampling: str='mean',
+                 num_scenarios: int=1,
+                 seed: Optional[int]=None,
                  verbose: int=1) -> None:
         '''Creates a new compiler for formulating a lifted RDDL domain + instance
         as a Gurobi mixed-integer non-linear optimization problem, without
-        grounding. Random variables are determinized: continuous and count
-        distributions by their mean, Bernoulli and Discrete by their mode.
+        grounding. With sampling='mean', random variables are determinized:
+        continuous and count distributions by their mean, Bernoulli and Discrete by
+        their mode. With sampling='reparam', the objective is the average return of
+        num_scenarios sampled rollouts sharing the plan parameters.
 
         :param rddl: the lifted RDDL model
         :param plan: the plan or policy to optimize
@@ -94,8 +99,17 @@ class GurobiRDDLCompiler:
         :param model_params: dictionary of parameter name and values to
         pass to Gurobi model after compilation (merged over the defaults
         NonConvex=2, IntegralityFocus=1 and IntFeasTol=1e-9)
+        :param sampling: how random variables are compiled, 'mean' or 'reparam'
+        :param num_scenarios: number of sampled rollouts with sampling='reparam'
+        (new samples are drawn on every call to compile)
+        :param seed: seed of the noise samples with sampling='reparam'
         :param verbose: whether to print nothing (0) or a summary (1) on compile
         '''
+        if sampling not in ('mean', 'reparam'):
+            raise ValueError(f'sampling must be mean or reparam, got {sampling}.')
+        if num_scenarios < 1 or (sampling == 'mean' and num_scenarios != 1):
+            raise ValueError(f'num_scenarios must be >= 1 with sampling=reparam, '
+                             f'or 1 with sampling=mean, got {num_scenarios}.')
         if rollout_horizon is None:
             if rddl.horizon == sys.maxsize:
                 raise ValueError('rollout_horizon must be set when the horizon is infinite.')
@@ -114,12 +128,19 @@ class GurobiRDDLCompiler:
         self.epsilon = epsilon
         self.model_params = model_params
         self.verbose = int(verbose)
+        self.num_scenarios = num_scenarios
+        self.seed = np.random.SeedSequence(seed).entropy
+        self.num_compiles = 0
 
         # compile the initial values, levels and traced objects for the RDDL model
         self.init_values = RDDLValueInitializer(rddl).initialize()
         self.levels = RDDLLevelAnalysis(rddl, allow_synchronous_state).compute_levels()
         self.traced = RDDLObjectsTracer(rddl, cpf_levels=self.levels).trace()
-        self._compile_init_state()
+
+        # the default initial state is determinized
+        self.sampling = 'mean'
+        self.init_values = self._compile_init_state()
+        self.sampling = sampling
         plan.validate(self)
 
     def summarize_hyperparameters(self) -> None:
@@ -128,6 +149,8 @@ class GurobiRDDLCompiler:
               f'    plan              ={type(self.plan).__name__}\n'
               f'    float_equality_tol={self.epsilon}\n'
               f'    lookahead_horizon ={self.horizon}\n'
+              f'    sampling          ={self.sampling}\n'
+              f'    num_scenarios     ={self.num_scenarios}\n'
               f'    verbose           ={self.verbose}\n'
               f'Gurobi model hyper-params:\n'
               f'    user_args         ={self.model_params}')
@@ -141,13 +164,13 @@ class GurobiRDDLCompiler:
                 start: Optional[Dict[str, Any]]=None):
         '''Compiles and returns the current RDDL domain as a Gurobi optimization
         problem over the rollout horizon. Also returns the action variables
-        constructed at each decision epoch and the plan parameter variables.
+        constructed at each decision epoch (of the first scenario) and the plan
+        parameter variables.
 
         :param init_values: override the initial values of fluents and
         non-fluents as defined in the RDDL file (if None, then the original
         values defined in the RDDL domain + instance are used instead)
-        :param env: an existing gurobi environment (if None, the default
-        environment is used)
+        :param env: an existing gurobi environment (if None, the default env is used)
         :param start: values of plan parameters to warm-start Gurobi with (if None,
         the plan's init_params are used)
         '''
@@ -159,7 +182,6 @@ class GurobiRDDLCompiler:
         model = gurobipy.Model(env=env) if env is not None else gurobipy.Model()
         for (name, value) in self.model_params.items():
             model.setParam(name, value)
-        subs = self._compile_init_subs(init_values)
         params = self.plan.params(self, model)
         if start is None:
             start = self.plan.init_params(self, model)
@@ -168,32 +190,47 @@ class GurobiRDDLCompiler:
                 var.Start = np.broadcast_to(
                     np.asarray(start[name], dtype=np.float64), var.shape)
 
-        # alive: the episode has not terminated before the current step
+        # the objective is the average return of the scenarios (one with sampling=mean)
+        self.num_compiles += 1
         objective = 0
+        for k in range(self.num_scenarios):
+            tag = f's{k}' if self.num_scenarios > 1 else ''
+            returns, action_vars = self._compile_rollout(
+                model, params, self._compile_init_subs(init_values, tag), tag)
+            objective = objective + returns / self.num_scenarios
+            if k == 0:
+                all_action_vars = action_vars
+        model.setObjective(objective, GRB.MAXIMIZE)
+        return model, all_action_vars, params
+
+    def _compile_rollout(self, model, params, subs, tag):
+        '''The return of one rollout from subs, and its action variables at each step;
+        tag makes the names of the rollout's variables and constraints unique.'''
+        returns = 0
         all_action_vars = []
-        alive = self._compile_alive(model, subs, self._constant(True), 'init')
+        alive = self._compile_alive(model, subs, self._constant(True), f'init{tag}')
         for step in range(self.horizon):
+            name = f'{step}{tag}'
             action_vars = self.plan.actions(self, model, params, step, subs)
             all_action_vars.append(action_vars)
             subs.update(action_vars)
             if not (alive[-1] or alive[0]):
                 continue
-            self._compile_maxnondef_constraint(model, subs, step)
+            self._compile_maxnondef_constraint(model, subs, name)
             self._compile_bool_constraints(
-                model, self.rddl.preconditions, subs, step, alive, 'precond',
+                model, self.rddl.preconditions, subs, name, alive, 'precond',
                 RDDLActionPreconditionNotSatisfiedError)
             self._compile_bool_constraints(
-                model, self.rddl.invariants, subs, step, alive, 'invariant',
+                model, self.rddl.invariants, subs, name, alive, 'invariant',
                 RDDLStateInvariantNotSatisfiedError)
-            self._compile_cpfs(model, subs, step)
-            reward = self._compile_reward(model, subs, step, alive)
-            objective = objective + (self.discount ** step) * reward
+            self._compile_cpfs(model, subs, name)
+            reward = self._compile_reward(model, subs, name, alive)
+            returns = returns + (self.discount ** step) * reward
             for (state, next_state) in self.rddl.next_state.items():
                 subs[state] = subs[next_state]
             if step + 1 < self.horizon:
-                alive = self._compile_alive(model, subs, alive, step + 1)
-        model.setObjective(objective, GRB.MAXIMIZE)
-        return model, all_action_vars, params
+                alive = self._compile_alive(model, subs, alive, f'{step + 1}{tag}')
+        return returns, all_action_vars
 
     def _compile_alive(self, model, subs, alive, step):
         '''alive and no termination condition holds in the current state.'''
@@ -225,22 +262,29 @@ class GurobiRDDLCompiler:
             model, alive_value, reward, 0, GRB.CONTINUOUS, f'rewardat{step}')
         return gated
 
-    def _compile_init_state(self) -> None:
-        subs = self._compile_init_subs()
+    def _compile_init_state(self, step='init') -> Dict[str, Any]:
+        '''The initial values with the init-state expressions evaluated in schedule order.'''
+        init_values = dict(self.init_values)
+        subs = {var: self._constant(value) for (var, value) in init_values.items()}
         for (name, expr, target, _) in self.traced.init_state_schedule:
-            sample, _, symb = self._gurobi(expr, None, subs, 'init')
+            sample, _, symb = self._gurobi(expr, None, subs, step)
             assert not symb
-            values = np.array(self.init_values[name])
+            values = np.array(init_values[name])
             sample = np.asarray(sample).astype(values.dtype)
             if isinstance(target, np.ndarray):
                 values = np.where(target, np.broadcast_to(sample, values.shape), values)
             else:
                 values[target] = sample
-            self.init_values[name] = values
+            init_values[name] = values
             subs[name] = self._constant(values)
+        return init_values
 
-    def _compile_init_subs(self, init_values=None) -> Dict[str, Any]:
-        values = dict(self.init_values)
+    def _compile_init_subs(self, init_values=None, tag=None) -> Dict[str, Any]:
+        '''The initial subs of the scenario named by tag, with init_values overriding.'''
+        if tag is None or self.sampling == 'mean':
+            values = dict(self.init_values)
+        else:
+            values = self._compile_init_state(f'init{tag}')
         if init_values is not None:
             values.update(init_values)
         return {var: self._constant(value) for (var, value) in values.items()}
@@ -425,6 +469,12 @@ class GurobiRDDLCompiler:
         '''1 / y for a constant y.'''
         y = np.asarray(y, dtype=np.float64)
         return np.divide(1., y, out=np.zeros_like(y), where=(y != 0))
+
+    def _domain(self, model, x, lb, key):
+        '''x as a variable bounded below by lb, where x >= lb is implied anyway.'''
+        arg = self._new(model, GRB.CONTINUOUS, np.shape(x), f'V{key}', lb=lb, ub=INF)
+        model.addConstr(arg == x, name=f'C{key}')
+        return arg
 
     def _new_bool(self, model, shape, name):
         return self._new(model, GRB.BINARY, shape, f'V{name}')
@@ -763,12 +813,7 @@ class GurobiRDDLCompiler:
         gap = 1 if integral else self.epsilon
 
         if op in ('>=', '>'):
-            strict = (op == '>')
-            res = self._new_bool(model, shape, f'{key}cmp')
-            model.addConstr((res == 1) >> (diff >= (gap if strict else 0)),
-                            name=f'C{key}cmp1')
-            model.addConstr((res == 0) >> (diff <= (0 if strict else -gap)),
-                            name=f'C{key}cmp0')
+            res = self._greater(model, diff, shape, f'{key}cmp', op == '>', gap)
             return res, GRB.BINARY, True
 
         elif op in ('==', '~='):
@@ -779,6 +824,13 @@ class GurobiRDDLCompiler:
                 return self._assign(model, gt + lt, GRB.BINARY, f'{key}neq')
 
         _not_implemented(f'Relational operator {op}', expr)
+
+    def _greater(self, model, diff, shape, key, strict, gap):
+        '''Binary res: whether diff > 0 (strict) or diff >= 0, separated by gap.'''
+        res = self._new_bool(model, shape, key)
+        model.addConstr((res == 1) >> (diff >= (gap if strict else 0)), name=f'C{key}1')
+        model.addConstr((res == 0) >> (diff <= (0 if strict else -gap)), name=f'C{key}0')
+        return res
 
     def _equality(self, model, diff, shape, key, gap=None):
         '''Binaries eq, gt, lt: exactly one of diff == 0, diff >= gap, diff <= -gap
@@ -944,6 +996,8 @@ class GurobiRDDLCompiler:
         eps = self.epsilon
 
         if name in self.NLFUNC_UNARY:
+            if name in ('sqrt', 'ln'):
+                x = self._domain(model, x, 0., f'{key}arg')
             return self._assign(
                 model, getattr(nlfunc, self.NLFUNC_UNARY[name])(x), GRB.CONTINUOUS, key)
         
@@ -1042,7 +1096,7 @@ class GurobiRDDLCompiler:
         pos, even, odd, frac, zero0, zeropos, zeroneg = (z[i] for i in range(7))
 
         # magnitude |x| ** y = exp(y log |x|), with a dummy base of 1 when x == 0
-        base = self._new(model, GRB.CONTINUOUS, shape, f'V{key}abs')
+        base = self._new(model, GRB.CONTINUOUS, shape, f'V{key}abs', lb=eps, ub=INF)
         model.addConstr((pos == 1) >> (x >= eps), name=f'C{key}xpos')
         model.addConstr((pos == 1) >> (base == x), name=f'C{key}abspos')
         for (i, case) in enumerate((even, odd, frac)):
@@ -1178,6 +1232,9 @@ class GurobiRDDLCompiler:
             arg, = expr.args
             return self._gurobi(arg, model, subs, step)
 
+        elif self.sampling == 'reparam':
+            return self._sample_random(expr, name, model, subs, step, key)
+
         elif name == 'Bernoulli':
             arg, = expr.args
             value, _, symb = self._gurobi(arg, model, subs, step)
@@ -1234,7 +1291,9 @@ class GurobiRDDLCompiler:
         index, = self.traced.cached_sim_info(expr)
         key = f'{expr.id}at{step}{name}'
 
-        if name in ('MultivariateNormal', 'MultivariateStudent'):
+        if self.sampling == 'reparam':
+            value, symb = self._sample_random_vector(expr, name, results, key)
+        elif name in ('MultivariateNormal', 'MultivariateStudent'):
             value, _, symb = results[0]
 
         elif name == 'Dirichlet':
@@ -1268,6 +1327,255 @@ class GurobiRDDLCompiler:
         if not symb:
             value = np.asarray(value, dtype=np.float64)
         return self._moveaxis(value, symb, -1, index), GRB.CONTINUOUS, symb
+
+    # ===========================================================================
+    # random variables (sampled: sampling='reparam')
+    # ===========================================================================
+
+    REPARAM = {
+        'Normal': ((), lambda rng, s, mean, std: mean + std * rng.standard_normal(s)),
+        'Uniform': ((), lambda rng, s, a, b: a + (b - a) * rng.uniform(size=s)),
+        'Exponential': ((), lambda rng, s, scale: scale * rng.standard_exponential(s)),
+        'Gamma': ((0,), lambda rng, s, shape, scale: scale * rng.standard_gamma(shape, s)),
+        'Gumbel': ((), lambda rng, s, mean, scale: mean + scale * rng.gumbel(size=s)),
+        'Laplace': ((), lambda rng, s, mean, scale: mean + scale * rng.laplace(size=s)),
+        'Cauchy': ((), lambda rng, s, mean, scale: mean + scale * rng.standard_cauchy(s)),
+        'Student': ((0,), lambda rng, s, df: rng.standard_t(df, s)),
+        'ChiSquare': ((0,), lambda rng, s, df: rng.chisquare(df, s)),
+        'Beta': ((0, 1), lambda rng, s, a, b: rng.beta(a, b, s)),
+    }
+
+    @staticmethod
+    def _exp(x):
+        return np.exp(x) if isinstance(x, (np.ndarray, np.generic)) else nlfunc.exp(x)
+
+    @staticmethod
+    def _log(x):
+        return np.log(x) if isinstance(x, (np.ndarray, np.generic)) else nlfunc.log(x)
+
+    INVERSE_CDF = {
+        'Weibull': (lambda rng, s: np.log(rng.standard_exponential(s)),
+                    lambda c, z, shape, scale: scale * c._exp(z / shape)),
+        'Pareto': (lambda rng, s: rng.standard_exponential(s),
+                   lambda c, z, shape, scale: scale * c._exp(z / shape)),
+        'Gompertz': (lambda rng, s: rng.standard_exponential(s),
+                     lambda c, z, shape, scale: c._log(1. + z / shape) / scale),
+        'Kumaraswamy': (lambda rng, s: np.log(rng.uniform(size=s)),
+                        lambda c, z, a, b: c._exp(c._log(1. - c._exp(z / b)) / a)),
+    }
+
+    COUNTS = ('Poisson', 'Binomial', 'NegativeBinomial', 'Geometric')
+
+    def _noise(self, key):
+        '''The noise generator of one random variable.'''
+        return np.random.default_rng(
+            [self.seed, self.num_compiles, int.from_bytes(key.encode(), 'little')])
+
+    def _event(self, model, diff, shape, key, scale=1.):
+        '''Binary res: whether diff >= 0, excluding the band |diff| < epsilon * scale
+        around a random threshold, so that the solver's tolerance cannot book an event 
+        the samples do not have.'''
+        gap = self.epsilon * scale
+        res = self._new_bool(model, shape, key)
+        model.addConstr((res == 1) >> (diff >= gap), name=f'C{key}1')
+        model.addConstr((res == 0) >> (diff <= -gap), name=f'C{key}0')
+        return res
+
+    def _not_reparam(self, name, expr):
+        _not_implemented(f'Distribution {name} with decision-dependent parameters '
+                         f'that have no exact encoding (sampling=reparam)', expr)
+
+    def _sample_random(self, expr, name, model, subs, step, key):
+        '''A sample with fresh noise, transformed by the distribution parameters.'''
+        eps = self.epsilon
+
+        # u < p, with u clipped so that p = 0 and p = 1 hold exactly under the gap eps
+        if name == 'Bernoulli':
+            arg, = expr.args
+            p, _, symb = self._gurobi(arg, model, subs, step)
+            u = np.clip(self._noise(key).uniform(size=np.shape(p)), eps, 1. - eps)
+            if symb:
+                return self._event(model, p - u, np.shape(p), key), GRB.BINARY, True
+            else:
+                return self._constant(u < p)
+                            
+        # inverse CDF: the number of cases j < n - 1 with cdf_j <= u
+        elif name in ('Discrete', 'UnnormDiscrete', 'Discrete(p)', 'UnnormDiscrete(p)'):
+            if name.endswith('(p)'):
+                _, (arg,) = expr.args
+                value, vtype, symb = self._gurobi(arg, model, subs, step)
+                cases = [(case, vtype, symb) for case in self._slices_along(value, -1)]
+            else:
+                cases = [self._gurobi(arg, model, subs, step)
+                         for arg in self.traced.cached_sim_info(expr)]
+            values = [value for (value, *_) in cases]
+            symbs = [symb for (*_, symb) in cases]
+            unnorm = name.startswith('Unnorm')
+            shape = self._shape_of(*values)
+            u = np.clip(self._noise(key).uniform(size=shape), eps, 1. - eps)
+            if not any(symbs):
+                cdf = np.cumsum(np.stack(np.broadcast_arrays(*values), axis=-1), axis=-1)
+                if unnorm:
+                    cdf = cdf / cdf[..., -1:]
+                return self._constant(np.sum(cdf[..., :-1] <= u[..., None], axis=-1))
+            total = sum(values) if unnorm else 1.
+            index, partial, partial_symb = np.zeros(shape), 0., False
+            for (j, (value, symb)) in enumerate(zip(values[:-1], symbs)):
+                partial = partial + value
+                partial_symb = partial_symb or symb
+                diff = u * total - partial
+                if partial_symb or unnorm:
+                    index = index + self._event(
+                        model, diff, shape, f'{key}cdf{j}', total)
+                else:
+                    index = index + (diff >= 0)
+            if isinstance(index, np.ndarray):
+                return self._constant(index.astype(INT))
+            else:
+                return self._expr(model, index, GRB.INTEGER, key)
+
+        # the count distributions have a decision-dependent probability p, which is not
+        # reparameterizable, so they are sampled directly from the noise
+        elif name in self.COUNTS:
+            return self._sample_count(expr, name, model, subs, step, key)
+
+        # the continuous distributions with a closed-form inverse CDF, which is exact
+        elif name in self.INVERSE_CDF:
+            noise, transform = self.INVERSE_CDF[name]
+            results = [self._gurobi(arg, model, subs, step) for arg in expr.args]
+            values = [self._domain(model, value, eps, f'{key}arg{i}') if symb else value
+                      for (i, (value, _, symb)) in enumerate(results)]
+            value = transform(
+                self, noise(self._noise(key), self._shape_of(*values)), *values)
+            if any(symb for (*_, symb) in results):
+                return self._expr(model, value, GRB.CONTINUOUS, key)
+            else:
+                return self._constant(value)
+
+        # continuous distributions with parameters entering linearly
+        if name not in self.REPARAM:
+            _not_implemented(f'Distribution {name}', expr)
+        constants, sample = self.REPARAM[name]
+        results = [self._gurobi(arg, model, subs, step) for arg in expr.args]
+        if any(results[i][-1] for i in constants):
+            self._not_reparam(name, expr)
+        if name == 'Normal':
+            var = results[1]
+            results[1] = self._gurobi_unary('sqrt', var, model, f'{key}std', expr) \
+                if var[-1] else self._constant(np.sqrt(var[0]))
+        values = [1 * value if not symb else value for (value, _, symb) in results]
+        value = sample(self._noise(key), self._shape_of(*values), *values)
+        if any(symb for (*_, symb) in results):
+            return self._expr(model, value, GRB.CONTINUOUS, key)
+        else:
+            return self._constant(np.asarray(value))
+
+    def _sample_count(self, expr, name, model, subs, step, key):
+        '''Count distributions with a decision-dependent probability p.'''
+        eps = self.epsilon
+        *counts, (p, _, symb) = [self._gurobi(arg, model, subs, step) for arg in expr.args]
+        rng = self._noise(key)
+
+        # the Poisson distribution is unbounded and has no closed-form inverse CDF
+        if name == 'Poisson':
+            if symb:
+                self._not_reparam(name, expr)
+            return self._constant(rng.poisson(p))
+
+        # the Binomial and NegativeBinomial distributions are bounded by n, which is
+        # decision-dependent, so they are not reparameterizable.
+        n = 1
+        if counts:
+            n, _, nsymb = counts[0]
+            if nsymb:
+                self._not_reparam(name, expr)
+        shape = self._shape_of(n, p)
+        n = np.broadcast_to(np.asarray(n), shape)
+        if np.any(n != np.round(n)):
+            if symb:
+                self._not_reparam(name, expr)
+            return self._constant(rng.negative_binomial(n, p))
+
+        # the sample is the number of trials with u < p, where u is uniform on [0, 1]
+        n = n.astype(INT)
+        count = int(n.max(initial=0))
+        mask = np.arange(count).reshape((count,) + (1,) * len(shape)) < n
+        u = np.clip(rng.uniform(size=(count,) + shape), eps, 1. - eps)
+
+        # the Binomial distribution is the sum of n Bernoulli trials, which are
+        # independent conditional on p, so the sample is the number of trials with u < p
+        if name == 'Binomial':
+            if not symb or not count:
+                return self._constant(np.sum(mask & (u < p), axis=0).astype(INT))
+            u = np.where(mask, u, 2.)
+            total = sum(self._event(model, p - u[i], shape, f'{key}ev{i}')
+                        for i in range(count))
+            return self._expr(model, total, GRB.INTEGER, key)
+
+        # the NegativeBinomial distribution is the number of failures before n successes,
+        # which is the sum of n independent Geometric distributions.
+        trials = self._geometric(model, p, symb, u, key)
+        if name == 'Geometric':
+            return (trials[0], GRB.INTEGER, True) if symb else self._constant(trials[0])
+        if not symb or not count:
+            return self._constant(
+                np.sum(np.where(mask, trials - 1, 0), axis=0).astype(INT))
+        else:
+            return self._expr(
+                model, (mask.astype(np.float64) * (trials - 1)).sum(axis=0), 
+                GRB.INTEGER, key)
+
+    def _geometric(self, model, p, symb, u, key):
+        '''Trials up to the first success, X = ceil(r) for r = ln u / ln(1 - p') + eps.'''
+        eps = self.epsilon
+        z = np.log(u)
+
+        # the trials are unbounded, so if p is constant, compute them directly
+        if not symb:
+            with np.errstate(divide='ignore', invalid='ignore'):
+                return np.ceil(z / np.log1p(-(1. - eps) * p) + eps).astype(INT)
+
+        # otherwise, introduce a new variable for the trials and constraints for the
+        # logarithm of the probability of failure, which is bounded away from 0 and 1
+        q = self._domain(model, 1. - (1. - eps) * p, eps, f'{key}q')
+        shape = np.shape(q)
+        log_q = self._new(model, GRB.CONTINUOUS, shape, f'V{key}log',
+                          lb=np.log(eps), ub=np.log1p(-eps * (1. - eps)))
+        model.addConstr(log_q == nlfunc.log(q), name=f'C{key}log')
+        r, *_ = self._assign(model, z / log_q + eps, GRB.CONTINUOUS, f'{key}r')
+        trials = self._new(model, GRB.INTEGER, np.shape(r), f'V{key}', lb=1, ub=INF)
+        model.addConstr(r <= trials - eps, name=f'C{key}1')
+        model.addConstr(r >= trials - 1 + eps, name=f'C{key}0')
+        return trials
+
+    def _sample_random_vector(self, expr, name, results, key):
+        '''A sample of a random vector along the last axis, and whether it is symbolic.'''
+        (value, _, symb), *rest = results
+
+        # if any of the parameters are symbolic, or if the distribution is Dirichlet or 
+        # Multinomial, the sample is not reparameterizable
+        if any(s for (*_, s) in rest) or (symb and name in ('Dirichlet', 'Multinomial')):
+            self._not_reparam(name, expr)
+
+        rng = self._noise(key)
+        if name in ('MultivariateNormal', 'MultivariateStudent'):
+            cov, *df = (v for (v, *_) in rest)
+            noise = np.matmul(np.linalg.cholesky(cov),
+                              rng.standard_normal(size=np.shape(value) + (1,)))[..., 0]
+            if df:
+                df, = df
+                noise = noise / np.expand_dims(np.sqrt(rng.chisquare(df) / df), axis=-1)
+            return value + noise, symb
+        
+        elif name == 'Dirichlet':
+            sample = rng.gamma(shape=value, scale=1.)
+            return sample / np.sum(sample, axis=-1, keepdims=True), False
+        
+        elif name == 'Multinomial':
+            prob, = (v for (v, *_) in rest)
+            return rng.multinomial(n=value, pvals=prob), False
+        
+        _not_implemented(f'Multivariate distribution {name}', expr)
 
     # ===========================================================================
     # matrix algebra (constant arguments only)
