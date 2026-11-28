@@ -13,6 +13,7 @@ from pyRDDLGym.core.compiler.model import RDDLLiftedModel
 from pyRDDLGym.core.compiler.tracer import RDDLObjectsTracer
 from pyRDDLGym.core.debug.exception import (
     print_stack_trace,
+    raise_warning,
     RDDLActionPreconditionNotSatisfiedError,
     RDDLNotImplementedError,
     RDDLStateInvariantNotSatisfiedError,
@@ -103,6 +104,9 @@ class GurobiRDDLCompiler:
         model_params.setdefault('NonConvex', 2)
         model_params.setdefault('IntegralityFocus', 1)
         model_params.setdefault('IntFeasTol', 1e-9)
+        if epsilon <= model_params.get('FeasibilityTol', 1e-6):
+            raise_warning(f'epsilon={epsilon} does not exceed Gurobi FeasibilityTol: '
+                          f'strict comparisons may be violated.', 'red')
         self.rddl = rddl
         self.plan = plan
         self.horizon = rollout_horizon
@@ -116,6 +120,7 @@ class GurobiRDDLCompiler:
         self.levels = RDDLLevelAnalysis(rddl, allow_synchronous_state).compute_levels()
         self.traced = RDDLObjectsTracer(rddl, cpf_levels=self.levels).trace()
         self._compile_init_state()
+        plan.validate(self)
 
     def summarize_hyperparameters(self) -> None:
         '''Prints the compiler and Gurobi model hyper-parameters.'''
@@ -132,7 +137,8 @@ class GurobiRDDLCompiler:
     # ===========================================================================
 
     def compile(self, init_values: Optional[Dict[str, Any]]=None,
-                env: Optional[gurobipy.Env]=None):
+                env: Optional[gurobipy.Env]=None,
+                start: Optional[Dict[str, Any]]=None):
         '''Compiles and returns the current RDDL domain as a Gurobi optimization
         problem over the rollout horizon. Also returns the action variables
         constructed at each decision epoch and the plan parameter variables.
@@ -142,6 +148,8 @@ class GurobiRDDLCompiler:
         values defined in the RDDL domain + instance are used instead)
         :param env: an existing gurobi environment (if None, the default
         environment is used)
+        :param start: values of plan parameters to warm-start Gurobi with (if None,
+        the plan's init_params are used)
         '''
         if self.verbose >= 1:
             self.summarize_hyperparameters()
@@ -153,6 +161,12 @@ class GurobiRDDLCompiler:
             model.setParam(name, value)
         subs = self._compile_init_subs(init_values)
         params = self.plan.params(self, model)
+        if start is None:
+            start = self.plan.init_params(self, model)
+        for (name, (var, _, symb)) in params.items():
+            if symb and name in start:
+                var.Start = np.broadcast_to(
+                    np.asarray(start[name], dtype=np.float64), var.shape)
 
         # alive: the episode has not terminated before the current step
         objective = 0
@@ -207,9 +221,8 @@ class GurobiRDDLCompiler:
             return reward
 
         # otherwise, introduce a new variable and constraints to gate the reward by alive
-        gated = self._new(model, GRB.CONTINUOUS, (), f'Vrewardat{step}')
-        model.addConstr((alive_value == 1) >> (gated == reward), name=f'Crewardat{step}1')
-        model.addConstr((alive_value == 0) >> (gated == 0), name=f'Crewardat{step}0')
+        gated, *_ = self._if_then_else(
+            model, alive_value, reward, 0, GRB.CONTINUOUS, f'rewardat{step}')
         return gated
 
     def _compile_init_state(self) -> None:
@@ -280,7 +293,12 @@ class GurobiRDDLCompiler:
             for cpf in cpfs:
                 _, expr = rddl.cpfs[cpf]
                 shape = rddl.object_counts(rddl.variable_params[cpf])
-                subs[cpf] = self._broadcast(self._gurobi(expr, model, subs, step), shape)
+                value, vtype, symb = self._broadcast(
+                    self._gurobi(expr, model, subs, step), shape)
+                if symb:
+                    name = re.sub('[^A-z0-9]', '', cpf)
+                    value = self._var(model, value, vtype, f'{name}at{step}')
+                subs[cpf] = (value, vtype, symb)
 
     # ===========================================================================
     # tensor helpers
@@ -306,6 +324,8 @@ class GurobiRDDLCompiler:
 
     @staticmethod
     def _gather(x, index):
+        if np.ndim(x) == 0 and isinstance(x, gurobipy.MLinExpr):
+            return x + np.zeros(np.shape(index[0]) if index else ())
         if np.ndim(x) == 0:
             x = x.reshape(1)
             index = (np.zeros_like(index[0]) if index else np.zeros((), dtype=int),)
@@ -353,8 +373,11 @@ class GurobiRDDLCompiler:
             return np.broadcast_to(value, shape), vtype, symb
         grid = np.indices(shape)
         keep = len(old_shape)
-        index = tuple(np.where(old_shape[i] == 1, 0, grid[len(shape) - keep + i])
-                      for i in range(keep))
+        if keep == 0:
+            index = (np.zeros(shape, dtype=np.int64),)
+        else:
+            index = tuple(np.where(old_shape[i] == 1, 0, grid[len(shape) - keep + i])
+                          for i in range(keep))
         return self._gather(value, index), vtype, symb
 
     def _new(self, model, vtype, shape, name, lb=None, ub=None):
@@ -366,6 +389,42 @@ class GurobiRDDLCompiler:
         res = self._new(model, vtype, np.shape(expr), f'V{name}')
         model.addConstr(res == expr, name=f'C{name}')
         return res, vtype, True
+
+    def _expr(self, model, expr, vtype, name):
+        '''Keeps a linear non-boolean expression as is (saving a variable and a row),
+        otherwise assigns it to a new variable (booleans feed indicator constraints).'''
+        if isinstance(expr, gurobipy.MVar) or (
+                isinstance(expr, gurobipy.MLinExpr) and vtype != GRB.BINARY):
+            return expr, vtype, True
+        else:
+            return self._assign(model, expr, vtype, name)
+
+    def _var(self, model, value, vtype, name):
+        '''A symbolic value as a variable tensor.'''
+        if isinstance(value, gurobipy.MVar):
+            return value
+        else:
+            return self._assign(model, value, vtype, name)[0]
+
+    def _if_then_else(self, model, pred, value1, value2, vtype, key):
+        '''res = value1 where the binary pred is 1, else value2.'''
+        shape = self._shape_of(pred, value1, value2)
+        res = self._new(model, vtype, shape, f'V{key}')
+        pred, *_ = self._broadcast((pred, GRB.BINARY, True), shape)
+        model.addConstr((pred == 1) >> (res == value1), name=f'C{key}1')
+        model.addConstr((pred == 0) >> (res == value2), name=f'C{key}0')
+        return res, vtype, True
+
+    @staticmethod
+    def _masked(mask, value, symb):
+        '''value where mask holds, else 0.'''
+        return mask.astype(np.float64) * value if symb else np.where(mask, value, 0.)
+
+    @staticmethod
+    def _reciprocal(y):
+        '''1 / y for a constant y.'''
+        y = np.asarray(y, dtype=np.float64)
+        return np.divide(1., y, out=np.zeros_like(y), where=(y != 0))
 
     def _new_bool(self, model, shape, name):
         return self._new(model, GRB.BINARY, shape, f'V{name}')
@@ -398,9 +457,10 @@ class GurobiRDDLCompiler:
                 stacked = np.stack([np.broadcast_to(value, shape) for value in values])
                 return self._constant(
                     np.take_along_axis(stacked, index_value[None], axis=0)[0])
-            masks = [(index_value == k).astype(np.float64) for k in range(len(values))]
-            expr = sum(mask * value for (mask, value) in zip(masks, values) if mask.any())
-            return self._assign(model, expr, vtype, f'{key}sel')
+            expr = sum(self._masked(index_value == k, value, symb)
+                       for (k, (value, _, symb)) in enumerate(cases) 
+                       if np.any(index_value == k))
+            return self._expr(model, expr, vtype, f'{key}sel')
 
         # otherwise, we need to create a one-hot selection variable and add constraints
         count = len(values)
@@ -452,7 +512,7 @@ class GurobiRDDLCompiler:
                 gap = (values[j] - best <= -eps) if maximize else (values[j] - best >= eps)
                 model.addConstr((z[k] == 1) >> gap, name=f'C{key}tie{k}_{j}')
         ks = np.arange(len(values)).reshape((len(values),) + (1,) * (z.ndim - 1))
-        return self._assign(model, (ks * z).sum(axis=0), GRB.INTEGER, f'{key}arg')
+        return self._expr(model, (ks * z).sum(axis=0), GRB.INTEGER, f'{key}arg')
 
     def _floor(self, model, value, key, mode='floor'):
         '''Integer res = floor/ceil(value) using the epsilon convention for strictness.'''
@@ -470,14 +530,15 @@ class GurobiRDDLCompiler:
         '''Quotient q = floor(x / y) and remainder r = x - y * q, as numpy.'''
         # if y is a constant, we can just compute the quotient and remainder directly
         if not y_symb:
-            q = self._floor(model, x * (1. / y), f'{key}q')
-            r, *_ = self._assign(model, x - y * q, rtype, f'{key}r')
+            q = self._floor(model, x * self._reciprocal(y), f'{key}q')
+            r, *_ = self._expr(model, x - y * q, rtype, f'{key}r')
             return q, r
 
         # the remainder has the sign of y: 0 <= r < y or y < r <= 0 (y == 0 is undefined)
         eps = self.epsilon
         delta = 1 if rtype == GRB.INTEGER else eps
         shape = self._shape_of(x, y)
+        y = self._var(model, y, GRB.CONTINUOUS, f'{key}y')
         y, *_ = self._broadcast((y, GRB.CONTINUOUS, True), shape)
         q = self._new(model, GRB.INTEGER, shape, f'V{key}q')
         r = self._new(model, rtype, shape, f'V{key}r')
@@ -611,7 +672,7 @@ class GurobiRDDLCompiler:
         if n == 1 and op == '-':
             value, vtype, symb = results[0]
             if symb:
-                return self._assign(
+                return self._expr(
                     model, -value, self._promote_vtype(vtype, GRB.INTEGER), f'{key}neg')
             else:
                 return self._constant(-value)
@@ -625,32 +686,48 @@ class GurobiRDDLCompiler:
                 vtype = self._promote_vtype(vtype, vtype2)
                 symb = symb or symb2
             if symb:
-                return self._assign(model, value, vtype, f'{key}add')
+                return self._expr(model, value, vtype, f'{key}add')
             else:
                 return self._constant(value)
  
         elif op == '*':
             value, vtype, symb = results[0]
             for (i, (value2, vtype2, symb2)) in enumerate(results[1:]):
-                value = value * value2
-                vtype = self._promote_vtype(vtype, vtype2, GRB.INTEGER)
-                symb = symb or symb2
-                if symb:
-                    value, vtype, symb = self._assign(model, value, vtype, f'{key}mul{i}')
-            return self._constant(value) if not symb else (value, vtype, symb)
+                rtype = self._promote_vtype(vtype, vtype2, GRB.INTEGER)
+                name = f'{key}mul{i}'
+                if symb and symb2 and GRB.BINARY in (vtype, vtype2):
+                    b, x = (value, value2) if vtype == GRB.BINARY else (value2, value)
+                    value, *_ = self._if_then_else(model, b, x, 0, rtype, name)
+                elif symb and symb2:
+                    value = self._var(model, value, vtype, f'{name}l')
+                    value2 = self._var(model, value2, vtype2, f'{name}r')
+                    value, *_ = self._assign(model, value * value2, rtype, name)
+                else:
+                    value = value * value2
+                vtype, symb = rtype, symb or symb2
+            if symb:
+                return self._expr(model, value, vtype, f'{key}mul')
+            return self._constant(value)
 
         elif op == '/' and n == 2:
             (value1, _, symb1), (value2, _, symb2) = results
             if not (symb1 or symb2):
                 return self._constant(value1 / value2)
             elif not symb2:
-                return self._assign(
-                    model, value1 * (1. / value2), GRB.CONTINUOUS, f'{key}div')
-            else:
-                res = self._new(
-                    model, GRB.CONTINUOUS, self._shape_of(value1, value2), f'V{key}div')
-                model.addConstr(res * value2 == value1, name=f'C{key}div')
-                return res, GRB.CONTINUOUS, True
+                return self._expr(
+                    model, value1 * self._reciprocal(value2), GRB.CONTINUOUS, f'{key}div')
+
+            # y == 0 gives 0 as for a constant y, and frees x (division in a dead branch)
+            vtype2 = results[1][1]
+            gap = 1 if vtype2 != GRB.CONTINUOUS else self.epsilon
+            y = self._var(model, value2, vtype2, f'{key}den')
+            zero, *_ = self._equality(model, y, np.shape(y), f'{key}den', gap)
+            num, *_ = self._if_then_else(model, zero, 0, value1, GRB.CONTINUOUS, f'{key}num')
+            res = self._new(model, GRB.CONTINUOUS, np.shape(num), f'V{key}div')
+            model.addConstr(res * y == num, name=f'C{key}div')
+            zero, *_ = self._broadcast((zero, GRB.BINARY, True), np.shape(num))
+            model.addConstr((zero == 1) >> (res == 0), name=f'C{key}div0')
+            return res, GRB.CONTINUOUS, True
 
         _not_implemented(f'Arithmetic operator {op} with {n} arguments', expr)
 
@@ -803,13 +880,14 @@ class GurobiRDDLCompiler:
         if op in ('sum', 'avg'):
             scale = 1.0 if op == 'sum' else 1.0 / count
             vtype = self._promote_vtype(vtype, GRB.INTEGER) if op == 'sum' else GRB.CONTINUOUS
-            return self._assign(model, scale * value.sum(axis=axes), vtype, f'{key}{op}')
+            return self._expr(model, scale * value.sum(axis=axes), vtype, f'{key}{op}')
 
-        if op in ('forall', 'exists'):
+        # a product of bools is their conjunction
+        if op in ('forall', 'exists') or (op == 'prod' and vtype == GRB.BINARY):
             keep = tuple(1 if i in axes else s for (i, s) in enumerate(shape))
             res = self._new_bool(model, np.delete(shape, axes), f'{key}{op}')
             res_keep = res.reshape(keep)
-            if op == 'forall':
+            if op != 'exists':
                 model.addConstr(res_keep <= value, name=f'C{key}forall1')
                 model.addConstr(res >= value.sum(axis=axes) - (count - 1), 
                                 name=f'C{key}forall2')
@@ -823,6 +901,8 @@ class GurobiRDDLCompiler:
             return self._extremum_value(model, cases, op == 'maximum', f'{key}{op}')
 
         if op == 'prod':
+            value = self._var(model, value, vtype, f'{key}arg')
+            cases = [(case, vtype, True) for case in self._slices_along(value, axes)]
             res = cases[0]
             vtype = self._promote_vtype(vtype, GRB.INTEGER)
             for (i, (case, *_)) in enumerate(cases[1:]):
@@ -874,6 +954,7 @@ class GurobiRDDLCompiler:
         
         elif name in self.INVERSE_TRIG:
             forward, lb, ub = self.INVERSE_TRIG[name]
+            x = self._var(model, x, vtype, f'{key}arg')
             res = self._new(model, GRB.CONTINUOUS, np.shape(x), f'V{key}', lb=lb, ub=ub)
             model.addConstr(x == getattr(nlfunc, forward)(res), name=f'C{key}')
             return res, GRB.CONTINUOUS, True
@@ -890,10 +971,10 @@ class GurobiRDDLCompiler:
             model.addConstr((pos == 0) >> (x <= 0), name=f'C{key}pos0')
             model.addConstr((neg == 1) >> (x <= -eps), name=f'C{key}neg1')
             model.addConstr((neg == 0) >> (x >= 0), name=f'C{key}neg0')
-            return self._assign(model, pos - neg, GRB.INTEGER, key)
+            return self._expr(model, pos - neg, GRB.INTEGER, key)
         
         elif name in ('floor', 'ceil'):
-            if vtype != GRB.CONTINUOUS:  # already integral
+            if vtype != GRB.CONTINUOUS:
                 return x, GRB.INTEGER, True
             return self._floor(model, x, key, name), GRB.INTEGER, True
         
@@ -921,7 +1002,8 @@ class GurobiRDDLCompiler:
             if symb2:
                 return self._assign(model, log_x / nlfunc.log(y), GRB.CONTINUOUS, key)
             else:
-                return self._assign(model, log_x * (1. / np.log(y)), GRB.CONTINUOUS, key)
+                return self._assign(
+                    model, log_x * self._reciprocal(np.log(y)), GRB.CONTINUOUS, key)
             
         elif name == 'hypot':
             return self._assign(model, nlfunc.sqrt(x * x + y * y), GRB.CONTINUOUS, key)
@@ -947,44 +1029,49 @@ class GurobiRDDLCompiler:
                 return self._assign(model, x ** y, GRB.CONTINUOUS, key)
             x, *_ = self._assign(model, x, GRB.CONTINUOUS, f'{key}base')
 
-        # z: base > 0, base < 0, base == 0
+        # cases: 
+        # base > 0
+        # base < 0 with an even, odd or non-integer exponent
+        # base == 0 with exponent == 0, > 0 or < 0
+        # numpy's nan/inf cases give 0 as x / 0 does
         eps = self.epsilon
         shape = self._shape_of(x, y)
         x, *_ = self._broadcast((x, GRB.CONTINUOUS, True), shape)
         y, *_ = self._broadcast((y, GRB.CONTINUOUS, True), shape)
-        z = self._one_hot(model, 3, shape, f'{key}sign')
-        model.addConstr((z[0] == 1) >> (x >= eps), name=f'C{key}xpos')
-        model.addConstr((z[1] == 1) >> (x <= -eps), name=f'C{key}xneg')
-        model.addConstr((z[2] == 1) >> (x == 0), name=f'C{key}xzero')
+        z = self._one_hot(model, 7, shape, f'{key}case')
+        pos, even, odd, frac, zero0, zeropos, zeroneg = (z[i] for i in range(7))
 
         # magnitude |x| ** y = exp(y log |x|), with a dummy base of 1 when x == 0
         base = self._new(model, GRB.CONTINUOUS, shape, f'V{key}abs')
-        model.addConstr((z[0] == 1) >> (base == x), name=f'C{key}abs0')
-        model.addConstr((z[1] == 1) >> (base == -x), name=f'C{key}abs1')
-        model.addConstr((z[2] == 1) >> (base == 1), name=f'C{key}abs2')
+        model.addConstr((pos == 1) >> (x >= eps), name=f'C{key}xpos')
+        model.addConstr((pos == 1) >> (base == x), name=f'C{key}abspos')
+        for (i, case) in enumerate((even, odd, frac)):
+            model.addConstr((case == 1) >> (x <= -eps), name=f'C{key}xneg{i}')
+            model.addConstr((case == 1) >> (base == -x), name=f'C{key}absneg{i}')
+        for (i, case) in enumerate((zero0, zeropos, zeroneg)):
+            model.addConstr((case == 1) >> (x == 0), name=f'C{key}xzero{i}')
+            model.addConstr((case == 1) >> (base == 1), name=f'C{key}abszero{i}')
         magnitude, *_ = self._assign(
             model, nlfunc.exp(y * nlfunc.log(base)), GRB.CONTINUOUS, f'{key}mag')
 
-        # negative base: only integer exponents, with sign (-1) ** y
-        half = self._new(model, GRB.INTEGER, shape, f'V{key}half')
-        parity = self._new_bool(model, shape, f'{key}parity')
-        model.addConstr((z[1] == 1) >> (y - 2 * half - parity == 0), name=f'C{key}int')
-        flip, *_ = self._logical_and(model, [z[1], parity], shape, f'{key}flip')
-        flipped = self._new(model, GRB.CONTINUOUS, shape, f'V{key}flipped')
-        model.addConstr((flip == 1) >> (flipped == magnitude), name=f'C{key}flip1')
-        model.addConstr((flip == 0) >> (flipped == 0), name=f'C{key}flip0')
+        # the exponent in each case: k is an integer
+        k = self._new(model, GRB.INTEGER, shape, f'V{key}k')
+        model.addConstr((even == 1) >> (y - 2 * k == 0), name=f'C{key}even')
+        model.addConstr((odd == 1) >> (y - 2 * k == 1), name=f'C{key}odd')
+        model.addConstr((frac == 1) >> (y - k >= eps), name=f'C{key}frac1')
+        model.addConstr((frac == 1) >> (y - k <= 1 - eps), name=f'C{key}frac2')
+        model.addConstr((zero0 == 1) >> (y == 0), name=f'C{key}zeroexp0')
+        model.addConstr((zeropos == 1) >> (y >= eps), name=f'C{key}zeroexp1')
+        model.addConstr((zeroneg == 1) >> (y <= -eps), name=f'C{key}zeroexp2')
 
-        # zero base: 0 ** 0 == 1, 0 ** y == 0 for y > 0, and y < 0 is undefined
-        one = self._new_bool(model, shape, f'{key}zero0')
-        zero = self._new_bool(model, shape, f'{key}zero1')
-        model.addConstr(one + zero == z[2], name=f'C{key}zero')
-        model.addConstr((one == 1) >> (y == 0), name=f'C{key}zeroexp0')
-        model.addConstr((zero == 1) >> (y >= eps), name=f'C{key}zeroexp1')
-
-        # the result is magnitude with the sign of flipped, or 1 when x == 0 and y == 0
+        # the result: (-1) ** y |x| ** y, 0 ** 0 == 1, and 0 otherwise
         res = self._new(model, GRB.CONTINUOUS, shape, f'V{key}')
-        model.addConstr((z[2] == 0) >> (res - magnitude + 2 * flipped == 0), name=f'C{key}1')
-        model.addConstr((z[2] == 1) >> (res - one == 0), name=f'C{key}0')
+        model.addConstr((pos == 1) >> (res == magnitude), name=f'C{key}respos')
+        model.addConstr((even == 1) >> (res == magnitude), name=f'C{key}reseven')
+        model.addConstr((odd == 1) >> (res == -magnitude), name=f'C{key}resodd')
+        model.addConstr((zero0 == 1) >> (res == 1), name=f'C{key}resone')
+        for (i, case) in enumerate((frac, zeropos, zeroneg)):
+            model.addConstr((case == 1) >> (res == 0), name=f'C{key}reszero{i}')
         return res, GRB.CONTINUOUS, True
 
     # ===========================================================================
@@ -1016,16 +1103,12 @@ class GurobiRDDLCompiler:
         if not symbp:
             if not (symb1 or symb2):
                 return self._constant(np.where(valuep, value1, value2))
-            p = np.asarray(valuep, np.float64)
-            return self._assign(model, p * value1 + (1 - p) * value2, vtype, key)
+            p = np.asarray(valuep, dtype=bool)
+            expr = self._masked(p, value1, symb1) + self._masked(~p, value2, symb2)
+            return self._expr(model, expr, vtype, key)
 
         # if the predicate is symbolic, introduce a new variable and constraints
-        shape = self._shape_of(valuep, value1, value2)
-        res = self._new(model, vtype, shape, f'V{key}')
-        valuep, *_ = self._broadcast((valuep, GRB.BINARY, True), shape)
-        model.addConstr((valuep == 1) >> (res == value1), name=f'C{key}1')
-        model.addConstr((valuep == 0) >> (res == value2), name=f'C{key}0')
-        return res, vtype, True
+        return self._if_then_else(model, valuep, value1, value2, vtype, key)
 
     def _gurobi_switch(self, expr, model, subs, step):
         pred, *_ = expr.args
@@ -1122,7 +1205,7 @@ class GurobiRDDLCompiler:
             shape, scale = values
             mean = scale * np.exp(lngamma(1. + 1. / np.asarray(shape, dtype=np.float64)))
             if symb:
-                return self._assign(model, mean, GRB.CONTINUOUS, key)
+                return self._expr(model, mean, GRB.CONTINUOUS, key)
             else:
                 return self._constant(np.asarray(mean, dtype=np.float64))
 
@@ -1130,7 +1213,7 @@ class GurobiRDDLCompiler:
         elif name in self.MEANS:
             mean = self.MEANS[name](*values)
             if symb:
-                return self._assign(model, mean, GRB.CONTINUOUS, key)
+                return self._expr(model, mean, GRB.CONTINUOUS, key)
             else:
                 return self._constant(np.asarray(mean, dtype=np.float64))
 
@@ -1165,13 +1248,18 @@ class GurobiRDDLCompiler:
                 value, *_ = self._assign(model, alpha / total, GRB.CONTINUOUS, key)
 
         elif name == 'Multinomial':
-            (trials, _, symb1), (prob, _, symb2) = results
+            (trials, ttype, symb1), (prob, ptype, symb2) = results
             symb = symb1 or symb2
-            trials = trials.reshape(np.shape(trials) + (1,)) if symb1 \
-                else np.expand_dims(trials, -1)
+            if symb1:
+                trials = self._var(model, trials, ttype, f'{key}n')
+                trials = trials.reshape(np.shape(trials) + (1,))
+            else:
+                trials = np.expand_dims(trials, -1)
+            if symb1 and symb2:
+                prob = self._var(model, prob, ptype, f'{key}p')
             value = trials * prob
             if symb:
-                value, *_ = self._assign(model, value, GRB.CONTINUOUS, key)
+                value, *_ = self._expr(model, value, GRB.CONTINUOUS, key)
 
         else:
             _not_implemented(f'Multivariate distribution {name}', expr)
@@ -1226,7 +1314,7 @@ class GurobiRDDLCompiler:
                    for j in range(np.shape(a)[-1]))
 
     def _det(self, model, a, key):
-        '''Determinant by cofactor expansion, memoizing minors to keep it quadratic.'''
+        '''Determinant by cofactor expansion, memoizing minors (O(n 2^n) of them).'''
         n = np.shape(a)[-1]
         minors = {}
   

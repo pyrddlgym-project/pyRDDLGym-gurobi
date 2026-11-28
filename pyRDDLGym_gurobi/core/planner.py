@@ -11,13 +11,19 @@ import numpy as np
 import gurobipy
 from gurobipy import GRB
 
-from pyRDDLGym.core.debug.exception import raise_warning
+from pyRDDLGym.core.debug.exception import raise_warning, RDDLNotImplementedError
 from pyRDDLGym.core.compiler.model import RDDLLiftedModel
 from pyRDDLGym.core.policy import BaseAgent
 
 from pyRDDLGym_gurobi.core.compiler import GurobiRDDLCompiler
 
 UNBOUNDED = (-GRB.INFINITY, +GRB.INFINITY)
+
+
+def _value_of(param) -> np.ndarray:
+    '''The value of a (value, vtype, symb) plan parameter, solved if symbolic.'''
+    value, _, symb = param
+    return np.asarray(value.X if symb else value)
 
 # ***********************************************************************
 # CONFIG FILE MANAGEMENT
@@ -128,6 +134,19 @@ class GurobiPlan:
                     lb.flat[i], ub.flat[i] = self.action_bounds[name]
         return np.clip(lb, *UNBOUNDED), np.clip(ub, *UNBOUNDED)
 
+    def validate(self, compiled: GurobiRDDLCompiler) -> None:
+        '''Warns about action_bounds keys that name no int or real action-fluent.'''
+        rddl = compiled.rddl
+        known = set()
+        for (action, prange) in rddl.action_ranges.items():
+            if prange in ('int', 'real'):
+                known.add(action)
+                known.update(rddl.variable_groundings[action])
+        unknown = sorted(set(self.action_bounds) - known)
+        if unknown:
+            raise_warning(f'action_bounds ignored for {unknown}: not int or real '
+                          f'action-fluents (or their groundings).', 'red')
+
     def summarize_hyperparameters(self) -> None:
         pass
 
@@ -144,12 +163,23 @@ class GurobiPlan:
 
     def init_params(self, compiled: GurobiRDDLCompiler,
                     model: gurobipy.Model) -> Dict[str, Any]:
-        '''Return initial parameter values for the current policy class.
+        '''Return initial parameter values for the current policy class, used to
+        warm-start Gurobi (none by default).
 
         :param compiled: A gurobi compiler where the current plan is initialized
         :param model: the gurobi model instance
         '''
-        raise NotImplementedError
+        return {}
+
+    def warm_start(self, compiled: GurobiRDDLCompiler,
+                   params: Dict[str, Any]) -> Dict[str, Any]:
+        '''Parameter values to warm-start the problem of the next decision epoch
+        when replanning, from the solved parameters of the current one.
+
+        :param compiled: A gurobi compiler where the current plan is initialized
+        :param params: solved parameter variables of the plan/policy
+        '''
+        return {name: _value_of(param) for (name, param) in params.items()}
 
     def actions(self, compiled: GurobiRDDLCompiler,
                 model: gurobipy.Model,
@@ -219,6 +249,14 @@ class GurobiStraightLinePlan(GurobiPlan):
                 for action in compiled.rddl.action_fluents
                 for step in range(compiled.horizon)}
 
+    def warm_start(self, compiled: GurobiRDDLCompiler, 
+                   params: Dict[str, Any]) -> Dict[str, Any]:
+        start = self.init_params(compiled, None)
+        for action in compiled.rddl.action_fluents:
+            for step in range(compiled.horizon - 1):
+                start[f'{action}__{step}'] = _value_of(params[f'{action}__{step + 1}'])
+        return start
+
     def actions(self, compiled: GurobiRDDLCompiler,
                 model: gurobipy.Model,
                 params: Dict[str, Any],
@@ -231,10 +269,21 @@ class GurobiStraightLinePlan(GurobiPlan):
                  params: Dict[str, Any],
                  step: int,
                  subs: Dict[str, Any]) -> Dict[str, np.ndarray]:
+        rddl = compiled.rddl
+
+        # past the planning horizon, return no-op actions
+        if step >= compiled.horizon:
+            if step == compiled.horizon:
+                raise_warning(f'Decision epoch {step} is past the planning horizon '
+                              f'{compiled.horizon}: using no-op actions.', 'red')
+            return {action: np.asarray(compiled.init_values[action])
+                    for action in rddl.action_fluents}
+
+        # otherwise, return the solved action values clipped to their bounds
         values = {}
-        for (action, prange) in compiled.rddl.action_ranges.items():
-            var, _, symb = params[f'{action}__{step}']
-            value = np.asarray(var.X if symb else var)
+        for (action, prange) in rddl.action_ranges.items():
+            value = _value_of(params[f'{action}__{step}'])
+            value = np.clip(value, *self._bounds(compiled, action))
             if prange == 'bool':
                 value = value > 0.5
             elif prange != 'real':
@@ -361,6 +410,9 @@ class GurobiPiecewisePolicy(GurobiPlan):
                 for k in range(self.num_cases):
                     model.addConstr(
                         params[f'ub__{action}__{k}'][0] >= params[f'lb__{action}__{k}'][0])
+                    if identity and k + 1 < self.num_cases:
+                        model.addConstr(params[f'lb__{action}__{k + 1}'][0] >=
+                                        params[f'ub__{action}__{k}'][0] + compiled.epsilon)
         return params
 
     def init_params(self, compiled: GurobiRDDLCompiler,
@@ -628,6 +680,10 @@ class GurobiOfflineController(BaseAgent):
         pass to Gurobi model after compilation
         :param verbose: whether to print nothing (0) or a summary (1) on compile
         '''
+        if rddl.observ_fluents and not isinstance(plan, GurobiStraightLinePlan):
+            raise RDDLNotImplementedError(
+                'POMDPs are only supported with an offline GurobiStraightLinePlan: '
+                'policies would read the initial state in place of observations.')
         self.rddl = rddl
         self.plan = plan
         self.compiler = GurobiRDDLCompiler(rddl=rddl, plan=plan, **compiler_kwargs)
@@ -687,6 +743,10 @@ class GurobiOnlineController(BaseAgent):
         pass to Gurobi model after compilation
         :param verbose: whether to print nothing (0) or a summary (1) on compile
         '''
+        if rddl.observ_fluents:
+            raise RDDLNotImplementedError(
+                'POMDPs are not supported by the online controller: replanning '
+                'would start from the initial state in place of the observations.')
         self.rddl = rddl
         self.plan = plan
         self.compiler = GurobiRDDLCompiler(rddl=rddl, plan=plan, **compiler_kwargs)
@@ -701,7 +761,7 @@ class GurobiOnlineController(BaseAgent):
 
         # optimize the policy parameters at the current time step
         subs = _lift_state(self.compiler, state)
-        model, _, params = self.compiler.compile(subs, env=self.env)
+        model, _, params = self.compiler.compile(subs, env=self.env, start=self.start)
         model.optimize()
         self.solved = model.SolCount > 0
 
@@ -709,16 +769,18 @@ class GurobiOnlineController(BaseAgent):
         if not self.solved:
             raise_warning('Gurobi failed to find a feasible solution '
                           'in the given time limit: using no-op action.', 'red')
-            del model
+            model.dispose()
+            self.start = None
             return {}
 
         # evaluate policy at the current time step with current inputs
         subs = {**self.compiler.init_values, **subs}
         action_values = self.plan.evaluate(
             self.compiler, params=params, step=0, subs=subs)
-        del model
+        self.start = self.plan.warm_start(self.compiler, params)
+        model.dispose()
         return _env_actions(
             self.compiler, action_values, _is_tensor_state(self.rddl, state))
 
     def reset(self) -> None:
-        pass
+        self.start = None
